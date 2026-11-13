@@ -70,10 +70,7 @@ class OpponentSeat extends StatelessWidget {
     // at the bottom.
     final avatarDown = playerIndex == 3;
     return Padding(
-      padding: EdgeInsets.only(
-        left: playerIndex == 1 ? 8 : 0,
-        right: playerIndex == 3 ? 8 : 0,
-      ),
+      padding: EdgeInsets.zero,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: playerIndex == 1

@@ -58,7 +58,7 @@ class Client {
 
 class Room {
   final int id;
-  final List<Client> seats;
+  final List<Client?> seats;
   final List<List<Tile>> hands = List.generate(4, (_) => <Tile>[]);
   final List<Placed> board = [];
   final List<int> scores = [0, 0];
@@ -69,10 +69,12 @@ class Room {
   String status = 'playing';
   String? lastMessage;
 
-  Room(this.id, this.seats) {
+  Room(this.id, List<Client?> seats) : seats = List.of(seats) {
     for (var i = 0; i < seats.length; i++) {
-      seats[i].seat = i;
-      seats[i].room = this;
+      final client = seats[i];
+      if (client == null) continue;
+      client.seat = i;
+      client.room = this;
     }
     _deal();
   }
@@ -112,6 +114,7 @@ class Room {
   }
 
   bool get boardEmpty => board.isEmpty;
+  bool get isBotTurn => seats[turn] == null;
 
   bool canPlay(Tile tile) {
     if (boardEmpty) return true;
@@ -145,8 +148,9 @@ class Room {
     }
 
     hand.removeAt(index);
-    board.add(Placed(tile, boardEmpty ? 'right' : side, connected));
-    if (boardEmpty) {
+    final opening = boardEmpty;
+    board.add(Placed(tile, opening ? 'right' : side, connected));
+    if (opening) {
       left = tile.a;
       right = tile.b;
     } else if (side == 'left') {
@@ -173,6 +177,22 @@ class Room {
       return;
     }
     _advance();
+  }
+
+  void playBotTurn() {
+    if (status != 'playing' || !isBotTurn) return;
+    final moves = hands[turn].where(canPlay);
+    if (moves.isEmpty) {
+      pass(turn);
+      return;
+    }
+    final tile = moves.first;
+    final fitsLeft = tile.matches(left);
+    final fitsRight = tile.matches(right);
+    final side = boardEmpty || (fitsLeft && fitsRight)
+        ? (Random().nextBool() ? 'left' : 'right')
+        : (fitsLeft ? 'left' : 'right');
+    play(turn, tile, side);
   }
 
   void _endHand(int winnerSeat) {
@@ -210,7 +230,7 @@ class Room {
     scores[team] += points;
     if (scores[team] >= kTargetScore) {
       status = 'gameover';
-      broadcast('gameover', message: 'Team ${team + 1} wins');
+      lastMessage = 'Team ${team + 1} wins';
       return;
     }
     _deal();
@@ -222,22 +242,28 @@ class Room {
     final note = message ?? lastMessage;
     lastMessage = null;
     for (final client in seats) {
-      if (!client.alive) continue;
+      if (client == null || !client.alive) continue;
+      final seat = client.seat!;
       client.send({
         'type': type,
         'room': id,
-        'you': client.seat,
+        'you': seat,
         'turn': turn,
         'status': status,
         'scores': scores,
         'left': left,
         'right': right,
         'board': board.map((p) => p.toJson()).toList(),
-        'hand': hands[client.seat!].map((t) => t.toJson()).toList(),
+        'hand': hands[seat].map((t) => t.toJson()).toList(),
         'counts': [for (final h in hands) h.length],
         'players': [
           for (var i = 0; i < seats.length; i++)
-            {'name': seats[i].name, 'seat': i, 'team': i % 2},
+            {
+              'name': seats[i]?.name ?? 'Bot ${i + 1}',
+              'seat': i,
+              'team': i % 2,
+              'bot': seats[i] == null,
+            },
         ],
         if (note != null) 'message': note,
       });
@@ -248,7 +274,10 @@ class Room {
 class Server {
   final List<Client> queue = [];
   final List<Room> rooms = [];
+  final Map<Room, Timer> _botTimers = {};
   int _nextRoom = 1;
+  Timer? _matchmakingTimer;
+  DateTime? _matchDeadline;
 
   Future<void> start(int port) async {
     final server = await HttpServer.bind(InternetAddress.anyIPv4, port);
@@ -319,41 +348,86 @@ class Server {
   void _join(Client client, Map<String, dynamic> message) {
     if (client.inQueue || client.room != null) return;
     final raw = (message['name'] as String?)?.trim() ?? '';
-    client.name = raw.isEmpty ? 'Player' : raw.substring(0, min(raw.length, 16));
+    client.name =
+        raw.isEmpty ? 'Player' : raw.substring(0, min(raw.length, 16));
     client.inQueue = true;
     queue.add(client);
+    _startMatchmakingClock();
     _notifyQueue();
-    if (queue.length >= kPlayersPerRoom) {
-      final group = queue.take(kPlayersPerRoom).toList();
-      for (final c in group) {
-        c.inQueue = false;
+  }
+
+  void _startMatchmakingClock() {
+    if (_matchmakingTimer != null) return;
+    _matchDeadline = DateTime.now().add(const Duration(seconds: 20));
+    _matchmakingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (queue.isEmpty) {
+        timer.cancel();
+        _matchmakingTimer = null;
+        _matchDeadline = null;
+        return;
       }
-      queue.removeRange(0, kPlayersPerRoom);
-      final room = Room(_nextRoom++, group);
+
+      final remaining = _matchDeadline!.difference(DateTime.now()).inSeconds;
+      if (remaining <= 0) {
+        timer.cancel();
+        _matchmakingTimer = null;
+        _matchDeadline = null;
+        _startQueuedMatches();
+      } else {
+        _notifyQueue(remaining);
+      }
+    });
+  }
+
+  void _startQueuedMatches() {
+    final waiting = queue.where((client) => client.alive).toList();
+    queue.clear();
+    while (waiting.isNotEmpty) {
+      final seats = <Client?>[];
+      for (var seat = 0; seat < kPlayersPerRoom; seat++) {
+        final client = waiting.isEmpty ? null : waiting.removeAt(0);
+        if (client != null) client.inQueue = false;
+        seats.add(client);
+      }
+
+      final room = Room(_nextRoom++, seats);
       rooms.add(room);
-      for (final c in group) {
-        c.send({
+      for (var seat = 0; seat < room.seats.length; seat++) {
+        final client = room.seats[seat];
+        if (client == null) continue;
+        client.send({
           'type': 'start',
           'room': room.id,
-          'seat': c.seat,
+          'seat': seat,
           'players': [
-            for (var i = 0; i < group.length; i++)
-              {'name': group[i].name, 'seat': i, 'team': i % 2},
+            for (var i = 0; i < room.seats.length; i++)
+              {
+                'name': room.seats[i]?.name ?? 'Bot ${i + 1}',
+                'seat': i,
+                'team': i % 2,
+                'bot': room.seats[i] == null,
+              },
           ],
         });
       }
-      room.broadcast('state');
-      _notifyQueue();
+      _publishRoom(room);
     }
+    _notifyQueue(0);
   }
 
-  void _notifyQueue() {
+  void _notifyQueue([int? secondsRemaining]) {
+    final remaining = secondsRemaining ??
+        ((_matchDeadline?.difference(DateTime.now()).inMilliseconds ?? 20000) /
+                1000)
+            .ceil()
+            .clamp(0, 20);
     for (var i = 0; i < queue.length; i++) {
       queue[i].send({
         'type': 'queued',
         'waiting': queue.length,
         'needed': kPlayersPerRoom,
         'position': i + 1,
+        'secondsRemaining': remaining,
       });
     }
   }
@@ -362,6 +436,11 @@ class Server {
     if (!client.inQueue) return;
     client.inQueue = false;
     queue.remove(client);
+    if (queue.isEmpty) {
+      _matchmakingTimer?.cancel();
+      _matchmakingTimer = null;
+      _matchDeadline = null;
+    }
     _notifyQueue();
   }
 
@@ -372,22 +451,48 @@ class Server {
     if (rawTile is! List || rawTile.length != 2) throw 'Bad tile.';
     final tile = Tile(rawTile[0] as int, rawTile[1] as int);
     room.play(client.seat!, tile, (message['side'] as String?) ?? 'right');
-    room.broadcast('state');
+    _publishRoom(room);
   }
 
   void _pass(Client client) {
     final room = client.room;
     if (room == null) throw 'You are not in a game.';
     room.pass(client.seat!);
-    room.broadcast('state');
+    _publishRoom(room);
+  }
+
+  void _publishRoom(Room room) {
+    final type = room.status == 'gameover' ? 'gameover' : 'state';
+    room.broadcast(type);
+    _scheduleBotTurn(room);
+  }
+
+  void _scheduleBotTurn(Room room) {
+    if (room.status != 'playing' || !room.isBotTurn) {
+      _botTimers.remove(room)?.cancel();
+      return;
+    }
+    if (_botTimers.containsKey(room)) return;
+
+    _botTimers[room] = Timer(const Duration(milliseconds: 650), () {
+      _botTimers.remove(room);
+      if (!rooms.contains(room) ||
+          room.status != 'playing' ||
+          !room.isBotTurn) {
+        return;
+      }
+      room.playBotTurn();
+      _publishRoom(room);
+    });
   }
 
   void _leaveRoom(Client client) {
     final room = client.room;
     if (room == null) return;
     client.room = null;
+    _botTimers.remove(room)?.cancel();
     for (final other in room.seats) {
-      if (other == client || !other.alive) continue;
+      if (other == null || other == client || !other.alive) continue;
       other.send({
         'type': 'gameover',
         'message': '${client.name} left the game.',

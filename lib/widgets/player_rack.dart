@@ -97,7 +97,9 @@ class PlayerRack extends StatelessWidget {
                         value: turnFraction.clamp(0.0, 1.0),
                         strokeWidth: 3,
                         backgroundColor: Colors.black.withValues(alpha: 0.35),
-                        valueColor: const AlwaysStoppedAnimation(Color(0xFFFFD700)),
+                        valueColor: const AlwaysStoppedAnimation(
+                          Color(0xFFFFD700),
+                        ),
                       ),
                     ),
                   Container(
@@ -305,10 +307,12 @@ class _SmoothHandState extends State<_SmoothHand> {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: (details) {
-            _tapRect = Rect.fromCenter(
-              center: details.globalPosition,
-              width: tileW,
-              height: tileH,
+            final tileOrigin = details.globalPosition - details.localPosition;
+            _tapRect = Rect.fromLTWH(
+              tileOrigin.dx,
+              tileOrigin.dy,
+              tileW,
+              tileH,
             );
           },
           onTap: canPlay ? () => widget.onTileTap(tile, _tapRect) : null,

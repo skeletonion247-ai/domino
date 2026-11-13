@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -16,7 +17,9 @@ import '../widgets/sprite_domino_tile.dart';
 /// Playable game table (Block, 2v2). The bots pick the first matching tile so
 /// we can test the flow while the full rules are wired.
 class GameScreen extends StatefulWidget {
-  const GameScreen({super.key});
+  final bool autoPlay;
+
+  const GameScreen({super.key, this.autoPlay = true});
 
   @override
   State<GameScreen> createState() => _GameScreenState();
@@ -28,7 +31,9 @@ class _GameScreenState extends State<GameScreen>
   static const double _turnSeconds = 20;
 
   final GlobalKey _boardKey = GlobalKey();
+  final GlobalKey _rackKey = GlobalKey();
   late final AnimationController _flyController;
+  final ValueNotifier<double> _turnProgress = ValueNotifier<double>(1);
   OverlayEntry? _flyEntry;
   bool _animating = false;
   final List<GlobalKey> _seatKeys = List.generate(4, (_) => GlobalKey());
@@ -107,17 +112,34 @@ class _GameScreenState extends State<GameScreen>
     super.initState();
     _flyController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 320),
+      duration: const Duration(milliseconds: 520),
     );
     _dealGame();
     _ticker = Timer.periodic(const Duration(milliseconds: 100), _onTick);
     _scheduleBots();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _precacheTiles());
+  }
+
+  /// Decode every tile sprite up front so no tile can show up blank mid-game
+  /// while its image is still loading.
+  Future<void> _precacheTiles() async {
+    final assets = <String>[
+      'assets/tiles/t1back.png',
+      'assets/tiles/t1shadow.png',
+      for (var hi = 0; hi <= 6; hi++)
+        for (var lo = 0; lo <= hi; lo++) 'assets/tiles/t1d$hi$lo.png',
+    ];
+    for (final asset in assets) {
+      if (!mounted) return;
+      await precacheImage(AssetImage(asset), context, onError: (_, _) {});
+    }
   }
 
   @override
   void dispose() {
     _botTimer?.cancel();
     _ticker?.cancel();
+    _turnProgress.dispose();
     _flyEntry?.remove();
     _flyEntry = null;
     _flyController.dispose();
@@ -135,11 +157,11 @@ class _GameScreenState extends State<GameScreen>
       _turnStart = DateTime.now();
     }
     if (_handOver || _animating) return;
+    _turnProgress.value = _turnFraction;
     if (_turnFraction <= 0) {
       _onTurnTimeout();
       return;
     }
-    setState(() {});
   }
 
   double get _turnFraction {
@@ -153,12 +175,10 @@ class _GameScreenState extends State<GameScreen>
     _turnStart = DateTime.now();
 
     if (_current == 0) {
-      final moves = _hand
-          .where((t) {
-            final (l, r) = _openEnds();
-            return t.matches(l) || t.matches(r);
-          })
-          .toList();
+      final moves = _hand.where((t) {
+        final (l, r) = _openEnds();
+        return t.matches(l) || t.matches(r);
+      }).toList();
       if (moves.isEmpty) {
         _registerPass();
       } else {
@@ -208,7 +228,9 @@ class _GameScreenState extends State<GameScreen>
 
     final hands = [_hand, _players[1].hand, _players[2].hand, _players[3].hand];
     for (var i = 0; i < hands.length; i++) {
-      final index = hands[i].indexWhere((tile) => tile.isDouble && tile.top == 6);
+      final index = hands[i].indexWhere(
+        (tile) => tile.isDouble && tile.top == 6,
+      );
       if (index >= 0) {
         final sixSix = hands[i].removeAt(index);
         _board.add(PlacedTile(sixSix, 'center', 6));
@@ -219,6 +241,7 @@ class _GameScreenState extends State<GameScreen>
 
     _turnStart = DateTime.now();
     _turnIndex = -1;
+    _turnProgress.value = 1;
   }
 
   /// Starts the next hand of the same match, keeping the scores.
@@ -282,11 +305,7 @@ class _GameScreenState extends State<GameScreen>
     final ends = _endsFor(tile);
     if (side == 'left' ? !ends.left : !ends.right) return;
     setState(() => _selected = null);
-    _startPlay(
-      tile,
-      side,
-      Rect.fromLTWH(dropPoint.dx, dropPoint.dy, 40, 88),
-    );
+    _startPlay(tile, side, Rect.fromLTWH(dropPoint.dx, dropPoint.dy, 40, 88));
   }
 
   void _startPlay(DominoTile tile, String side, Rect? fromRect) {
@@ -362,11 +381,11 @@ class _GameScreenState extends State<GameScreen>
     final left =
         placement.offset.dx -
         bounds.left -
-        (placement.horizontal ? 102.0 : 50.0) * scale / 2;
+        (placement.horizontal ? 130.0 : 60.0) * scale / 2;
     final top =
         placement.offset.dy -
         bounds.top -
-        (placement.horizontal ? 50.0 : 102.0) * scale / 2;
+        (placement.horizontal ? 60.0 : 130.0) * scale / 2;
     final w = (placement.horizontal ? 130.0 : 60.0) * scale;
     final h = (placement.horizontal ? 60.0 : 130.0) * scale;
 
@@ -393,13 +412,27 @@ class _GameScreenState extends State<GameScreen>
     DominoTile tile,
     Rect from,
     ({Rect rect, bool horizontal, bool flipped}) target,
-    VoidCallback onDone,
-  ) {
+    VoidCallback onDone, {
+    bool fromHorizontal = false,
+  }) {
     final overlay = Overlay.of(context);
     final face = _faceAsset(tile);
     final horizontal = target.horizontal;
     final flipped = target.flipped;
     final to = target.rect;
+    final fromScale = (from.height / (fromHorizontal ? 60 : 130))
+        .clamp(0.2, 1.0)
+        .toDouble();
+    final toScale = (to.height / (horizontal ? 60 : 130))
+        .clamp(0.2, 1.0)
+        .toDouble();
+    final targetTurns = (horizontal ? 1 : 0) + (flipped ? 2 : 0);
+    var targetAngle = targetTurns * math.pi / 2;
+    if (targetAngle > math.pi) targetAngle -= math.pi * 2;
+    final startAngle = fromHorizontal ? math.pi / 2 : 0.0;
+    var angleDelta = targetAngle - startAngle;
+    if (angleDelta > math.pi) angleDelta -= math.pi * 2;
+    if (angleDelta < -math.pi) angleDelta += math.pi * 2;
 
     _flyEntry?.remove();
     _flyEntry = OverlayEntry(
@@ -407,22 +440,28 @@ class _GameScreenState extends State<GameScreen>
         child: AnimatedBuilder(
           animation: _flyController,
           builder: (context, _) {
-            final t = Curves.easeOutCubic.transform(_flyController.value);
-            final rect = Rect.lerp(from, to, t)!;
-            final imgW = horizontal ? rect.height : rect.width;
-            final imgH = horizontal ? rect.width : rect.height;
-            final turns = ((horizontal ? 1 : 0) + (flipped ? 2 : 0)) % 4;
+            final t = Curves.easeInOutCubic.transform(_flyController.value);
+            final center =
+                Offset.lerp(from.center, to.center, t)! +
+                Offset(0, -42 * math.sin(math.pi * t));
+            final scale = fromScale + (toScale - fromScale) * t;
+            final angle = startAngle + angleDelta * t;
+            final imageWidth = 60 * scale;
+            final imageHeight = 130 * scale;
             return Stack(
               fit: StackFit.expand,
               children: [
-                Positioned.fromRect(
-                  rect: rect,
-                  child: RotatedBox(
-                    quarterTurns: turns,
+                Positioned(
+                  left: center.dx - imageWidth / 2,
+                  top: center.dy - imageHeight / 2,
+                  width: imageWidth,
+                  height: imageHeight,
+                  child: Transform.rotate(
+                    angle: angle,
                     child: Image.asset(
                       face,
-                      width: imgW,
-                      height: imgH,
+                      width: imageWidth,
+                      height: imageHeight,
                       fit: BoxFit.fill,
                     ),
                   ),
@@ -567,29 +606,29 @@ class _GameScreenState extends State<GameScreen>
             child: Padding(
               padding: const EdgeInsets.all(margin),
               child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
-              decoration: BoxDecoration(
-                color: hover
-                    ? const Color(0xFFFFD700).withValues(alpha: 0.45)
-                    : const Color(0xFF0A2518).withValues(alpha: 0.55),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: const Color(0xFFFFD700).withValues(alpha: 0.9),
-                  width: 2,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFFFFD700).withValues(alpha: 0.35),
-                    blurRadius: 10,
+                duration: const Duration(milliseconds: 120),
+                decoration: BoxDecoration(
+                  color: hover
+                      ? const Color(0xFFFFD700).withValues(alpha: 0.45)
+                      : const Color(0xFF0A2518).withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFFFFD700).withValues(alpha: 0.9),
+                    width: 2,
                   ),
-                ],
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFFFFD700).withValues(alpha: 0.35),
+                      blurRadius: 10,
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.add_rounded,
+                  color: Color(0xFFFFD700),
+                  size: 26,
+                ),
               ),
-              child: const Icon(
-                Icons.add_rounded,
-                color: Color(0xFFFFD700),
-                size: 26,
-              ),
-            ),
             ),
           );
         },
@@ -610,6 +649,17 @@ class _GameScreenState extends State<GameScreen>
     _botTimer?.cancel();
     if (_handOver) return;
     if (_current == 0) {
+      if (widget.autoPlay) {
+        if (_playable.isEmpty) {
+          _botTimer = Timer(const Duration(milliseconds: 220), () {
+            if (!mounted || _current != 0 || _playable.isNotEmpty) return;
+            _registerPass();
+          });
+        } else {
+          _botTimer = Timer(const Duration(milliseconds: 240), _playAutoHuman);
+        }
+        return;
+      }
       // Human turn: auto-skip when there is nothing playable.
       if (_playable.isEmpty) {
         _botTimer = Timer(const Duration(milliseconds: 900), () {
@@ -619,7 +669,50 @@ class _GameScreenState extends State<GameScreen>
       }
       return;
     }
-    _botTimer = Timer(const Duration(milliseconds: 800), _playBot);
+    _botTimer = Timer(
+      Duration(milliseconds: widget.autoPlay ? 240 : 800),
+      _playBot,
+    );
+  }
+
+  void _playAutoHuman() {
+    if (!mounted || _handOver || _animating || _current != 0) return;
+    final (left, right) = _openEnds();
+    for (final tile in _hand) {
+      final side = tile.matches(left)
+          ? 'left'
+          : tile.matches(right)
+          ? 'right'
+          : null;
+      if (side == null) continue;
+      _startPlay(tile, side, _rackTileRect(tile));
+      return;
+    }
+    _registerPass();
+  }
+
+  Rect? _rackTileRect(DominoTile tile) {
+    final box = _rackKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize || _hand.isEmpty) return null;
+
+    final count = _hand.length;
+    final availableWidth = math.max(1.0, box.size.width - 84);
+    final scale = ((availableWidth / count - 4) / 60)
+        .clamp(0.25, 0.8)
+        .toDouble();
+    final tileWidth = 60 * scale;
+    final tileHeight = 130 * scale;
+    final slotWidth = tileWidth + 4;
+    final totalWidth = count * slotWidth - 4;
+    final leftPad = (availableWidth - totalWidth) / 2;
+    final index = _hand.indexOf(tile).clamp(0, count - 1).toInt();
+    final origin = box.localToGlobal(Offset.zero);
+    return Rect.fromLTWH(
+      origin.dx + 64 + leftPad + index * slotWidth - 1.4 * scale,
+      origin.dy + 4 + (111 - tileHeight) / 2 - 2 * scale,
+      tileWidth,
+      tileHeight,
+    );
   }
 
   void _playBot() {
@@ -656,7 +749,17 @@ class _GameScreenState extends State<GameScreen>
   /// played it, then places it and passes the turn.
   void _flyBotTile(int seat, DominoTile tile, String side, int connected) {
     final player = _players[seat];
-    final from = _seatRect(seat);
+    final seatBounds = _seatRect(seat);
+    // Opponents' side tiles lie flat; the top opponent's tiles stand upright.
+    final fromHorizontal = seat != 2;
+    const sourceScale = 0.6048;
+    final from = seatBounds == null
+        ? null
+        : Rect.fromCenter(
+            center: seatBounds.center,
+            width: (fromHorizontal ? 130 : 60) * sourceScale,
+            height: (fromHorizontal ? 60 : 130) * sourceScale,
+          );
     final target = _boardTargetRect(tile, side, connected);
     player.hand.remove(tile);
 
@@ -682,16 +785,12 @@ class _GameScreenState extends State<GameScreen>
       return;
     }
     setState(() => _animating = true);
-    _flyTile(
-      tile,
-      Rect.fromCenter(center: from.center, width: 50, height: 90),
-      target,
-      land,
-    );
+    _flyTile(tile, from, target, land, fromHorizontal: fromHorizontal);
   }
 
   Rect? _seatRect(int seat) {
-    final box = _seatKeys[seat].currentContext?.findRenderObject() as RenderBox?;
+    final box =
+        _seatKeys[seat].currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return null;
     return box.localToGlobal(Offset.zero) & box.size;
   }
@@ -739,9 +838,17 @@ class _GameScreenState extends State<GameScreen>
       }
     });
 
-    final gameOver =
-        _team1Score >= _targetScore || _team2Score >= _targetScore;
+    final gameOver = _team1Score >= _targetScore || _team2Score >= _targetScore;
     if (gameOver) {
+      if (widget.autoPlay) {
+        _botTimer = Timer(const Duration(milliseconds: 1100), () {
+          if (!mounted) return;
+          _dealGame();
+          setState(() {});
+          _scheduleBots();
+        });
+        return;
+      }
       _showHandOver(winningTeam, points);
       return;
     }
@@ -801,12 +908,15 @@ class _GameScreenState extends State<GameScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ScoreHeader(
-              team1Score: _team1Score,
-              team2Score: _team2Score,
-              targetScore: _targetScore,
-              turnFraction: _turnFraction,
-              onMenu: () => Navigator.of(context).maybePop(),
+            ValueListenableBuilder<double>(
+              valueListenable: _turnProgress,
+              builder: (context, progress, _) => ScoreHeader(
+                team1Score: _team1Score,
+                team2Score: _team2Score,
+                targetScore: _targetScore,
+                turnFraction: progress,
+                onMenu: () => Navigator.of(context).maybePop(),
+              ),
             ),
             Expanded(
               child: ClipRect(
@@ -841,11 +951,14 @@ class _GameScreenState extends State<GameScreen>
                       top: 4,
                       left: 0,
                       right: 0,
-                      child: OpponentSeat(
-                        player: _players[2],
-                        playerIndex: 2,
-                        isCurrentTurn: _current == 2,
-                        turnProgress: _current == 2 ? _turnFraction : 1,
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: _turnProgress,
+                        builder: (context, progress, _) => OpponentSeat(
+                          player: _players[2],
+                          playerIndex: 2,
+                          isCurrentTurn: _current == 2,
+                          turnProgress: _current == 2 ? progress : 1,
+                        ),
                       ),
                     ),
                     // Left opponent (team 2).
@@ -855,12 +968,15 @@ class _GameScreenState extends State<GameScreen>
                       top: 0,
                       bottom: 0,
                       child: Center(
-                        child: OpponentSeat(
-                          player: _players[1],
-                          playerIndex: 1,
-                          isCurrentTurn: _current == 1,
-                          turnProgress: _current == 1 ? _turnFraction : 1,
-                          direction: Axis.vertical,
+                        child: ValueListenableBuilder<double>(
+                          valueListenable: _turnProgress,
+                          builder: (context, progress, _) => OpponentSeat(
+                            player: _players[1],
+                            playerIndex: 1,
+                            isCurrentTurn: _current == 1,
+                            turnProgress: _current == 1 ? progress : 1,
+                            direction: Axis.vertical,
+                          ),
                         ),
                       ),
                     ),
@@ -871,19 +987,22 @@ class _GameScreenState extends State<GameScreen>
                       top: 0,
                       bottom: 0,
                       child: Center(
-                        child: OpponentSeat(
-                          player: _players[3],
-                          playerIndex: 3,
-                          isCurrentTurn: _current == 3,
-                          turnProgress: _current == 3 ? _turnFraction : 1,
-                          direction: Axis.vertical,
+                        child: ValueListenableBuilder<double>(
+                          valueListenable: _turnProgress,
+                          builder: (context, progress, _) => OpponentSeat(
+                            player: _players[3],
+                            playerIndex: 3,
+                            isCurrentTurn: _current == 3,
+                            turnProgress: _current == 3 ? progress : 1,
+                            direction: Axis.vertical,
+                          ),
                         ),
                       ),
                     ),
                     // The domino board.
                     Positioned.fill(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(58, 50, 58, 28),
+                        padding: const EdgeInsets.fromLTRB(42, 50, 42, 28),
                         child: Stack(
                           clipBehavior: Clip.none,
                           children: [
@@ -921,19 +1040,23 @@ class _GameScreenState extends State<GameScreen>
                 ),
               ),
             ),
-            PlayerRack(
-              hand: _hand,
-              playable: _playable,
-              isMyTurn: _current == 0,
-              turnFraction: _turnFraction,
-              onTileTap: _playHuman,
-              onSort: () {},
-              onReorder: _reorderHand,
-              onPlayDragChanged: (tile) {
-                if (_dragTile != tile) {
-                  setState(() => _dragTile = tile);
-                }
-              },
+            ValueListenableBuilder<double>(
+              valueListenable: _turnProgress,
+              builder: (context, progress, _) => PlayerRack(
+                key: _rackKey,
+                hand: _hand,
+                playable: _playable,
+                isMyTurn: _current == 0,
+                turnFraction: progress,
+                onTileTap: _playHuman,
+                onSort: () {},
+                onReorder: _reorderHand,
+                onPlayDragChanged: (tile) {
+                  if (_dragTile != tile) {
+                    setState(() => _dragTile = tile);
+                  }
+                },
+              ),
             ),
           ],
         ),
@@ -953,9 +1076,19 @@ class _GameScreenState extends State<GameScreen>
         ),
       ),
       child: Text(
-        isHumanTurn ? 'YOUR TURN' : 'Bot is thinking...',
+        _handOver
+            ? (_team1Score >= _targetScore || _team2Score >= _targetScore
+                  ? 'MATCH COMPLETE • NEXT GAME...'
+                  : 'HAND COMPLETE • NEXT HAND...')
+            : widget.autoPlay
+            ? '${_players[_current].name.toUpperCase()} • AUTO PLAY'
+            : isHumanTurn
+            ? 'YOUR TURN'
+            : 'Bot is thinking...',
         style: TextStyle(
-          color: isHumanTurn ? const Color(0xFFFFD700) : Colors.white70,
+          color: isHumanTurn || _handOver
+              ? const Color(0xFFFFD700)
+              : Colors.white70,
           fontSize: 11,
           fontWeight: FontWeight.w800,
           letterSpacing: 0.6,
@@ -974,13 +1107,19 @@ class _Felt extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
+        Image.asset(
+          'assets/ui/table_wood.jpg',
+          fit: BoxFit.cover,
+          filterQuality: FilterQuality.medium,
+        ),
+        // Warm light so the wood reads lighter and the table feels lit.
         const DecoratedBox(
           decoration: BoxDecoration(
             gradient: RadialGradient(
-              center: Alignment(0, -0.2),
+              center: Alignment(0, -0.3),
               radius: 1.0,
-              colors: [Color(0xFF26703F), Color(0xFF17512F), Color(0xFF0A2A19)],
-              stops: [0.0, 0.6, 1.0],
+              colors: [Color(0x26FFE9C9), Color(0x0AFFE9C9), Color(0x00000000)],
+              stops: [0.0, 0.55, 1.0],
             ),
           ),
         ),
@@ -989,7 +1128,7 @@ class _Felt extends StatelessWidget {
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [Color(0x14FFFFFF), Color(0x00FFFFFF), Color(0x22000000)],
+              colors: [Color(0x18FFFFFF), Color(0x00FFFFFF), Color(0x33000000)],
               stops: [0.0, 0.5, 1.0],
             ),
           ),
@@ -997,9 +1136,9 @@ class _Felt extends StatelessWidget {
         const DecoratedBox(
           decoration: BoxDecoration(
             gradient: RadialGradient(
-              radius: 1.0,
-              colors: [Color(0x00000000), Color(0x73000000)],
-              stops: [0.6, 1.0],
+              radius: 0.98,
+              colors: [Color(0x00000000), Color(0x66000000)],
+              stops: [0.5, 1.0],
             ),
           ),
         ),

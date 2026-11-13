@@ -3,7 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-/// Connects four fake players, queues them, and plays random legal moves.
+/// Joins one player, verifies the 20-second bot-fill match, and plays through a
+/// a complete hand against the three server-controlled bots.
 /// Usage: dart run bin/smoke.dart [ws://127.0.0.1:8080]
 Future<void> main(List<String> args) async {
   final url = args.isNotEmpty ? args[0] : 'ws://127.0.0.1:8080';
@@ -20,40 +21,56 @@ Future<void> main(List<String> args) async {
     exit(0);
   }
 
-  for (var i = 0; i < 4; i++) {
-    final socket = await WebSocket.connect(url);
-    final fake = _Fake(socket, 'Bot$i', () => done('game over'));
-    clients.add(fake);
-    socket.listen(fake.onData, onDone: () {}, onError: (_) {});
-    socket.add(jsonEncode({'type': 'join', 'name': 'Bot$i'}));
-  }
+  final socket = await WebSocket.connect(url);
+  final fake = _Fake(socket, 'SmokePlayer', done);
+  clients.add(fake);
+  socket.listen(fake.onData, onDone: () {}, onError: (_) {});
+  socket.add(jsonEncode({'type': 'join', 'name': 'SmokePlayer'}));
 
-  Timer(const Duration(seconds: 12), () {
-    done('timeout — no game over within 12s');
+  Timer(const Duration(seconds: 60), () {
+    done('timeout — no hand completed within 60s');
   });
 }
 
 class _Fake {
   final WebSocket socket;
   final String name;
-  final void Function() onGameOver;
+  final void Function(String) onDone;
   final Random random = Random();
   int? seat;
   int actions = 0;
+  int states = 0;
 
-  _Fake(this.socket, this.name, this.onGameOver);
+  _Fake(this.socket, this.name, this.onDone);
 
   void onData(dynamic raw) {
     final message = jsonDecode(raw as String) as Map<String, dynamic>;
     switch (message['type']) {
       case 'start':
         seat = message['seat'] as int;
+        stdout.writeln('Started in seat ${seat! + 1}: ${message['players']}');
+        final players = message['players'] as List;
+        final botCount = players.where((p) => (p as Map)['bot'] == true).length;
+        if (botCount != 3) {
+          stderr.writeln('Expected three bots, got $botCount');
+          exit(1);
+        }
+        break;
+      case 'queued':
+        stdout.writeln('Queued: ${message['secondsRemaining']}s remaining');
         break;
       case 'state':
+        states++;
+        if (states % 10 == 0) {
+          stdout.writeln(
+            'State $states: turn ${message['turn']}, '
+            'score ${message['scores']}, board ${(message['board'] as List).length}',
+          );
+        }
         _maybeAct(message);
         break;
       case 'gameover':
-        onGameOver();
+        onDone('game over');
         break;
       case 'error':
         stderr.writeln('$name error: ${message['message']}');
@@ -62,20 +79,32 @@ class _Fake {
   }
 
   void _maybeAct(Map<String, dynamic> state) {
-    if (state['status'] != 'playing') return;
+    if (state['status'] != 'playing') {
+      onDone('game over');
+      return;
+    }
+    final board = state['board'] as List;
+    final scores = (state['scores'] as List).cast<int>();
+    if (board.isEmpty && scores.any((score) => score > 0)) {
+      onDone('completed a hand with scores $scores');
+      return;
+    }
     if (state['turn'] != seat) return;
     if (seat == null) return;
 
-    final hand = (state['hand'] as List)
-        .map((t) => (t as List).cast<int>())
-        .toList();
+    final hand =
+        (state['hand'] as List).map((t) => (t as List).cast<int>()).toList();
     final left = state['left'] as int;
     final right = state['right'] as int;
     final empty = state['board'] is List && (state['board'] as List).isEmpty;
 
     final moves = <List<int>>[];
     for (final tile in hand) {
-      if (empty || tile[0] == left || tile[1] == left || tile[0] == right || tile[1] == right) {
+      if (empty ||
+          tile[0] == left ||
+          tile[1] == left ||
+          tile[0] == right ||
+          tile[1] == right) {
         moves.add(tile);
       }
     }
@@ -94,6 +123,7 @@ class _Fake {
       if (fitsLeft && fitsRight) side = random.nextBool() ? 'left' : 'right';
     }
     actions++;
+    if (actions % 10 == 0) stdout.writeln('Human actions: $actions');
     if (actions > 500) {
       stderr.writeln('$name: too many actions');
       exit(1);

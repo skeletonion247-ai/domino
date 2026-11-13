@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../models/domino_tile.dart';
 import '../widgets/sprite_domino_tile.dart';
 import 'game_screen.dart';
+import 'menu_pages.dart';
 
 class _C {
   static const skyTop = Color(0xFF7AD7FF);
@@ -73,15 +74,131 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
     ).push(MaterialPageRoute(builder: (_) => const GameScreen()));
   }
 
-  void _comingSoon(String name) {
+  void _openPage(Widget page) {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => page));
+  }
+
+  void _showMessage(String message) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content: Text('$name is coming soon'),
-          duration: const Duration(milliseconds: 900),
+          content: Text(message),
+          duration: const Duration(milliseconds: 1000),
         ),
       );
+  }
+
+  void _openStore() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: _Panel(
+            radius: 22,
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      'STORE',
+                      style: TextStyle(
+                        color: _C.navy,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 2,
+                      ),
+                    ),
+                    const Spacer(),
+                    GestureDetector(
+                      onTap: () => Navigator.of(sheetContext).pop(),
+                      child: const Icon(
+                        Icons.close_rounded,
+                        color: _C.navy,
+                        size: 24,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                _storeRow('COINS', 'assets/ui/icon_ico_coin.png', '1,250', 3.99),
+                const SizedBox(height: 8),
+                _storeRow('GEMS', 'assets/ui/icon_ico_gem.png', '112', 2.99),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _storeRow(String label, String asset, String amount, double price) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.65),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: _C.frostEdge.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          Image.asset(asset, width: 34, height: 34),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    color: _C.navy,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 1,
+                  ),
+                ),
+                Text(
+                  'x$amount',
+                  style: TextStyle(
+                    color: _C.navy.withValues(alpha: 0.6),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            width: 92,
+            child: _PressButton(
+              onTap: () {
+                Navigator.of(context).pop();
+                _showMessage('$label pack purchased');
+              },
+              height: 38,
+              depth: 5,
+              radius: 12,
+              faceColors: const [_C.green, _C.greenDeep],
+              edgeColor: _C.greenEdge,
+              child: Text(
+                '\$${price.toStringAsFixed(2)}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -167,11 +284,17 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
       padding: const EdgeInsets.symmetric(horizontal: 14),
       child: Row(
         children: [
-          Expanded(child: _buildProfileCard()),
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _openPage(const ProfilePage()),
+              child: _buildProfileCard(),
+            ),
+          ),
           const SizedBox(width: 8),
-          _currencyPill('assets/ui/icon_ico_coin.png', '1,250'),
+          _currencyPill('assets/ui/icon_ico_coin.png', '1,250', _openStore),
           const SizedBox(width: 6),
-          _currencyPill('assets/ui/icon_ico_gem.png', '112'),
+          _currencyPill('assets/ui/icon_ico_gem.png', '112', _openStore),
         ],
       ),
     );
@@ -308,24 +431,28 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
     );
   }
 
-  Widget _currencyPill(String asset, String value) {
-    return _Panel(
-      radius: 16,
-      padding: const EdgeInsets.fromLTRB(5, 5, 10, 5),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Image.asset(asset, width: 22, height: 22),
-          const SizedBox(width: 5),
-          Text(
-            value,
-            style: const TextStyle(
-              color: _C.navy,
-              fontSize: 13,
-              fontWeight: FontWeight.w900,
+  Widget _currencyPill(String asset, String value, VoidCallback onTap) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: _Panel(
+        radius: 16,
+        padding: const EdgeInsets.fromLTRB(5, 5, 10, 5),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Image.asset(asset, width: 22, height: 22),
+            const SizedBox(width: 5),
+            Text(
+              value,
+              style: const TextStyle(
+                color: _C.navy,
+                fontSize: 13,
+                fontWeight: FontWeight.w900,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -735,7 +862,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
                 child: _navButton(
                   'assets/ui/icon_ico_stats.png',
                   'RANKS',
-                  () => _comingSoon('Ranks'),
+                  () => _openPage(const RanksPage()),
                 ),
               ),
               const SizedBox(width: 8),
@@ -743,7 +870,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
                 child: _navButton(
                   'assets/ui/icon_ico_options.png',
                   'MISSIONS',
-                  () => _comingSoon('Missions'),
+                  () => _openPage(const MissionsPage()),
                 ),
               ),
               const SizedBox(width: 8),
@@ -751,7 +878,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
                 child: _navButton(
                   'assets/ui/icon_ico_chatmessage.png',
                   'FRIENDS',
-                  () => _comingSoon('Friends'),
+                  () => _openPage(const FriendsPage()),
                 ),
               ),
               const SizedBox(width: 8),
@@ -759,7 +886,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
                 child: _navButton(
                   'assets/ui/icon_ico_settings.png',
                   'SETTINGS',
-                  () => _comingSoon('Settings'),
+                  () => _openPage(const SettingsPage()),
                 ),
               ),
             ],

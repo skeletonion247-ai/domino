@@ -669,9 +669,9 @@ Rect _layoutBounds(List<_Pos> positions, double w, double h) {
   return Rect.fromLTRB(minX, minY, maxX, maxY);
 }
 
-/// Lays the chain out from the centre: 4 tiles in the middle row, then the
-/// left side turns up and the right side turns down. Tiles stay inside the
-/// boundary; if the whole thing can't fit, it zooms out.
+/// Lays the chain out from the centre: segments turn after four tile-length
+/// units (crosswise doubles count as half). Tiles stay inside the boundary;
+/// if the whole thing can't fit, it zooms out.
 SnakeLayout computeLayout(
   List<PlacedTile> board, {
   required double maxWidth,
@@ -680,22 +680,26 @@ SnakeLayout computeLayout(
   if (board.isEmpty) return SnakeLayout(const [], Rect.zero, 1.0);
 
   const middleCount = 3;
-  final middle = board.take(middleCount).toList();
-  final leftMiddle = middle.where((p) => p.side == 'left').length;
-  final rightMiddle = middle.where((p) => p.side == 'right').length;
+  final middle = board.skip(1).take(middleCount - 1).toList();
+  double segmentUnits(Iterable<PlacedTile> tiles) =>
+      tiles.fold<double>(0, (sum, p) => sum + (p.tile.isDouble ? 0.5 : 1.0));
+  final leftMiddle = segmentUnits(middle.where((p) => p.side == 'left'));
+  final rightMiddle = segmentUnits(middle.where((p) => p.side == 'right'));
 
-  final left = board.where((p) => p.side == 'left').toList();
-  final right = board.where((p) => p.side == 'right').toList();
+  final playedTiles = board.skip(1);
+  final left = playedTiles.where((p) => p.side == 'left').toList();
+  final right = playedTiles.where((p) => p.side == 'right').toList();
+  final top = playedTiles.where((p) => p.side == 'top').toList();
+  final bottom = playedTiles.where((p) => p.side == 'bottom').toList();
+  final topMiddle = segmentUnits(middle.where((p) => p.side == 'top'));
+  final bottomMiddle = segmentUnits(middle.where((p) => p.side == 'bottom'));
 
-  double s = 0.75;
-  var placements = <TilePlacement>[];
-  var bounds = Rect.zero;
-
-  for (var iter = 0; iter < 80; iter++) {
-    placements = [];
+  List<TilePlacement> plan(double s) {
+    final placements = <TilePlacement>[];
     final center = board.first.tile;
     final centerHorizontal = !center.isDouble;
     final centerW = (centerHorizontal ? _tileW : _tileH) * s;
+    final centerH = (centerHorizontal ? _tileH : _tileW) * s;
     final centerHi = math.max(center.top, center.bottom);
     placements.add(
       TilePlacement(
@@ -707,15 +711,71 @@ SnakeLayout computeLayout(
       ),
     );
 
-    _addSide(placements, left, true, centerW, s, leftMiddle);
-    _addSide(placements, right, false, centerW, s, rightMiddle);
-
-    bounds = _placementsBounds(placements, s);
-    if (bounds.width <= maxWidth * 0.9 && bounds.height <= maxHeight * 0.9) {
-      break;
+    // Horizontal middle line: centre + the first run on each side. The 3rd
+    // turn must get its vertical column past this line.
+    double firstRunExtent(List<PlacedTile> chain, double units) {
+      if (chain.isEmpty) return 0;
+      var extent = 0.0;
+      var n = 0;
+      var u = 0.0;
+      for (final p in chain) {
+        final along = p.tile.isDouble ? _tileH * s : _tileW * s;
+        extent += along + (n > 0 ? 2.0 : 0.0);
+        n++;
+        u += p.tile.isDouble ? 0.5 : 1.0;
+        if (u >= units) break;
+      }
+      return extent;
     }
-    s -= 0.02;
-    if (s < 0.2) break;
+
+    final lineLeft =
+        -centerW / 2 -
+        (left.isNotEmpty ? 2.0 + firstRunExtent(left, leftMiddle) : 0.0);
+    final lineRight =
+        centerW / 2 +
+        (right.isNotEmpty ? 2.0 + firstRunExtent(right, rightMiddle) : 0.0);
+
+    _addSide(
+      placements,
+      left,
+      0,
+      centerW,
+      s,
+      leftMiddle,
+      lineLimit: lineRight,
+      linePassRight: true,
+    );
+    _addSide(
+      placements,
+      right,
+      2,
+      centerW,
+      s,
+      rightMiddle,
+      lineLimit: lineLeft,
+      linePassRight: false,
+    );
+    _addSide(placements, top, 1, centerH, s, topMiddle);
+    _addSide(placements, bottom, 3, centerH, s, bottomMiddle);
+    return placements;
+  }
+
+  // Build the plan once at full size, then scale the whole thing to the board
+  // in a couple of passes. No 0.02-step shrink loop: this keeps the largest
+  // scale that fits inside the red boundary.
+  var s = 0.75;
+  var placements = plan(s);
+  var bounds = _placementsBounds(placements, s);
+  for (var pass = 0; pass < 3; pass++) {
+    final fit = math.min(
+      maxWidth * 0.94 / math.max(bounds.width, 1),
+      maxHeight * 0.94 / math.max(bounds.height, 1),
+    );
+    final next = math.max(0.1, math.min(0.75, s * fit));
+    if ((next - s).abs() < 0.001) break;
+    s = next;
+    placements = plan(s);
+    bounds = _placementsBounds(placements, s);
   }
 
   return SnakeLayout(placements, bounds, s);
@@ -724,11 +784,13 @@ SnakeLayout computeLayout(
 void _addSide(
   List<TilePlacement> out,
   List<PlacedTile> tiles,
-  bool isLeft,
+  int initialDir,
   double centerW,
   double s,
-  int middleN,
-) {
+  double middleN, {
+  double? lineLimit,
+  bool linePassRight = true,
+}) {
   if (tiles.isEmpty) return;
   final tileW = _tileW * s;
   final tileH = _tileH * s;
@@ -736,41 +798,84 @@ void _addSide(
   const dirs = [Offset(-1, 0), Offset(0, -1), Offset(1, 0), Offset(0, 1)];
 
   var lastCenter = const Offset(0, 0);
-  var prevDir = isLeft ? 0 : 2;
+  var prevDir = initialDir;
   var dir = prevDir;
   var segLeft = middleN;
+  var turns = 0;
   var prevAlong = centerW;
   var prevPerp = tileH;
   Offset? tileCenter;
 
+  // True while the vertical run would still cross the horizontal middle line.
+  // [lineLimit] is the far end of that line (B) and the run must get past it.
+  bool stillCrossesLine(int nextDir, PlacedTile placed) {
+    if (lineLimit == null || nextDir == 0 || nextDir == 2) return false;
+    final tile = placed.tile;
+    final horizontal = tile.isDouble;
+    final along = horizontal ? tileH : tileW;
+    final perp = horizontal ? tileW : tileH;
+    final slide = tile.isDouble ? perp / 4 : 0.0;
+    final center =
+        lastCenter +
+        dirs[prevDir] * ((prevAlong - perp) / 2 + slide) +
+        dirs[nextDir] * (prevPerp / 2 + along / 2 + gap);
+    final half = perp / 2;
+    final columnLeft = center.dx - half;
+    final columnRight = center.dx + half;
+    final clearance = tileH + gap;
+    return linePassRight
+        ? columnLeft < lineLimit + clearance
+        : columnRight > lineLimit - clearance;
+  }
+
   for (var i = 0; i < tiles.length; i++) {
-    // Fixed 4 tiles per segment after the middle row, then turn clockwise.
-    if (i > 0 && segLeft <= 0) {
-      dir = (dir + 1) % 4;
-      segLeft = 4;
+    // Turns 1 and 2 keep the 4-unit count. The 3rd (vertical) turn only
+    // happens once the run has passed the end of the horizontal middle line.
+    if (i > 0) {
+      final nextDir = (dir + 1) % 4;
+      var turning = false;
+      if (turns < 3) {
+        if (turns == 2) {
+          final blocked = stillCrossesLine(nextDir, tiles[i]);
+          if (!blocked) {
+            turning = true;
+          } else if (segLeft <= 0) {
+            segLeft = tiles[i].tile.isDouble ? 0.5 : 1.0;
+          }
+        } else if (segLeft <= 0) {
+          turning = true;
+        }
+      } else if (segLeft <= 0) {
+        segLeft = 4.0;
+      }
+      if (turning) {
+        dir = nextDir;
+        turns++;
+        segLeft = 4.0;
+      }
     }
 
     final p = tiles[i];
     final tile = p.tile;
     final chainHorizontal = dir == 0 || dir == 2;
-    // Doubles stand across the chain.
+    // Doubles cross the chain; ordinary tiles follow its direction.
     final horizontal = tile.isDouble ? !chainHorizontal : chainHorizontal;
     final along = (horizontal == chainHorizontal) ? tileW : tileH;
     final perp = (horizontal == chainHorizontal) ? tileH : tileW;
 
     if (i == 0) {
-      tileCenter = Offset(
-        (isLeft ? -1 : 1) * (centerW / 2 + gap + along / 2),
-        0,
-      );
+      tileCenter = dirs[dir] * (centerW / 2 + gap + along / 2);
     } else if (dir == prevDir) {
       tileCenter = lastCenter + dirs[dir] * (prevAlong / 2 + gap + along / 2);
     } else {
-      // Line the new run's outer edge up with the end of the previous tile,
-      // so a double (short along the chain) doesn't leave a step.
+      // At a turn, align the new tile with the previous tile's end and leave
+      // the same clearance as a straight connection. A double at the bend
+      // slides a quarter of its crosswise edge toward the previous run, so
+      // only half of its outer half lines up with that run (as in fix.png).
+      final doubleCornerSlide = tile.isDouble ? perp / 4 : 0.0;
       tileCenter =
           lastCenter +
-          dirs[prevDir] * ((prevAlong - perp) / 2) +
+          dirs[prevDir] * ((prevAlong - perp) / 2 + doubleCornerSlide) +
           dirs[dir] * (prevPerp / 2 + along / 2 + gap);
     }
 
@@ -791,8 +896,8 @@ void _addSide(
     prevDir = dir;
     prevAlong = along;
     prevPerp = perp;
-    // Every tile counts, including doubles, so a straight line stays at 4.
-    segLeft--;
+    // Crosswise doubles use about half the path length, so count as 0.5.
+    segLeft -= tile.isDouble ? 0.5 : 1.0;
   }
 }
 
@@ -880,6 +985,14 @@ class GameBoard extends StatelessWidget {
         );
         final bounds = layout.bounds;
         final scale = layout.scale;
+        final seenTileIds = <String, int>{};
+        final positionKeys = <Key>[];
+        for (final pos in layout.positions) {
+          final id = '${pos.tile.top}-${pos.tile.bottom}';
+          final occurrence = seenTileIds[id] ?? 0;
+          seenTileIds[id] = occurrence + 1;
+          positionKeys.add(ValueKey('$id-$occurrence'));
+        }
 
         return Stack(
           clipBehavior: Clip.none,
@@ -897,45 +1010,64 @@ class GameBoard extends StatelessWidget {
                 ),
               ),
             ),
-            Center(
-              child: SizedBox(
-                width: bounds.width,
-                height: bounds.height,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    for (final pos in layout.positions)
-                      Positioned(
-                        key: ValueKey('${pos.tile.top}-${pos.tile.bottom}'),
-                        left:
-                            pos.offset.dx -
-                            bounds.left -
-                            (pos.horizontal ? _tileW : _tileH) * scale / 2,
-                        top:
-                            pos.offset.dy -
-                            bounds.top -
-                            (pos.horizontal ? _tileH : _tileW) * scale / 2,
-                        child:
-                            tileBuilder?.call(
-                              pos.tile,
-                              horizontal: pos.horizontal,
-                              isFlipped: pos.isFlipped,
-                              scale: scale,
-                            ) ??
-                            DominoTileWidget(
-                              tile: pos.tile,
-                              horizontal: pos.horizontal,
-                              isFlipped: pos.isFlipped,
-                              scale: scale,
-                            ),
-                      ),
-                  ],
-                ),
+            for (var i = 0; i < layout.positions.length; i++)
+              _buildAnimatedTile(
+                layout.positions[i],
+                positionKeys[i],
+                bounds,
+                scale,
+                constraints,
+                tileBuilder,
               ),
-            ),
           ],
         );
       },
+    );
+  }
+
+  Widget _buildAnimatedTile(
+    TilePlacement pos,
+    Key key,
+    Rect bounds,
+    double scale,
+    BoxConstraints constraints,
+    Widget Function(
+      DominoTile tile, {
+      required bool horizontal,
+      required bool isFlipped,
+      required double scale,
+    })?
+    tileBuilder,
+  ) {
+    return AnimatedPositioned(
+      key: key,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeInOutCubic,
+      left:
+          (constraints.maxWidth - bounds.width) / 2 +
+          pos.offset.dx -
+          bounds.left -
+          (pos.horizontal ? _tileW : _tileH) * scale / 2,
+      top:
+          (constraints.maxHeight - bounds.height) / 2 +
+          pos.offset.dy -
+          bounds.top -
+          (pos.horizontal ? _tileH : _tileW) * scale / 2,
+      width: (pos.horizontal ? _tileW : _tileH) * scale,
+      height: (pos.horizontal ? _tileH : _tileW) * scale,
+      child:
+          tileBuilder?.call(
+            pos.tile,
+            horizontal: pos.horizontal,
+            isFlipped: pos.isFlipped,
+            scale: scale,
+          ) ??
+          DominoTileWidget(
+            tile: pos.tile,
+            horizontal: pos.horizontal,
+            isFlipped: pos.isFlipped,
+            scale: scale,
+          ),
     );
   }
 }

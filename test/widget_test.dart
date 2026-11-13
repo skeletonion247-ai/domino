@@ -4,6 +4,7 @@ import 'package:domino/main.dart';
 void main() {
   testWidgets('App loads', (WidgetTester tester) async {
     await tester.pumpWidget(const DominoApp());
-    expect(find.text('DOMINO'), findsOneWidget);
+    expect(find.text('DOMINO'), findsWidgets);
+    expect(find.text('PLAY'), findsOneWidget);
   });
 }
