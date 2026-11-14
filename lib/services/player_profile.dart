@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -33,6 +34,32 @@ class PlayerProfile extends ChangeNotifier {
   SharedPreferences? _prefs;
 
   static const _defaultName = 'PLAYER';
+
+  static const _namePool = <String>[
+    'NOVA',
+    'RAVEN',
+    'KAI',
+    'LUNA',
+    'ORION',
+    'MILA',
+    'ZEUS',
+    'IRIS',
+    'FELIX',
+    'SAGE',
+    'REX',
+    'ACE',
+    'NEO',
+    'SKY',
+    'BOLT',
+    'DOM',
+  ];
+
+  /// Random one-time name for a brand-new profile, e.g. NOVA482.
+  static String randomName() {
+    final rng = Random();
+    return '${_namePool[rng.nextInt(_namePool.length)]}'
+        '${100 + rng.nextInt(900)}';
+  }
 
   String name = _defaultName;
   int avatarIndex = 0;
@@ -76,7 +103,14 @@ class PlayerProfile extends ChangeNotifier {
       return;
     }
     final p = _prefs!;
-    name = p.getString('profile.name') ?? name;
+    final savedName = p.getString('profile.name');
+    if (savedName == null || savedName.trim().isEmpty) {
+      // First launch ever: give this profile its own random name once.
+      name = randomName();
+      unawaited(p.setString('profile.name', name));
+    } else {
+      name = savedName;
+    }
     avatarIndex = p.getInt('profile.avatar') ?? avatarIndex;
     level = p.getInt('profile.level') ?? level;
     xp = p.getInt('profile.xp') ?? xp;

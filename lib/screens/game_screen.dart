@@ -1099,6 +1099,14 @@ class _GameScreenState extends State<GameScreen>
 }
 
 /// Green felt table background.
+/// Public felt background shared by the game and matchmaking screens.
+class FeltTable extends StatelessWidget {
+  const FeltTable({super.key});
+
+  @override
+  Widget build(BuildContext context) => const _Felt();
+}
+
 class _Felt extends StatelessWidget {
   const _Felt();
 

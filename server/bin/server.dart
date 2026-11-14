@@ -139,6 +139,16 @@ class Room {
     final hand = hands[seat];
     final index = hand.indexWhere((t) => t.a == tile.a && t.b == tile.b);
     if (index < 0) throw 'That tile is not in your hand.';
+    // Block dominoes: the match opens with the highest double in the
+    // starter's hand (the dealer already picks that player to start).
+    if (boardEmpty) {
+      final highest = hands[seat]
+          .where((t) => t.isDouble)
+          .fold<int>(-1, (best, t) => t.a > best ? t.a : best);
+      if (!(tile.isDouble && tile.a == highest)) {
+        throw 'The first tile must be your highest double.';
+      }
+    }
     if (!canPlay(tile)) throw 'That tile does not fit either end.';
     if (!boardEmpty && side != 'left' && side != 'right') {
       throw 'Choose a side.';
@@ -187,6 +197,15 @@ class Room {
 
   void playBotTurn() {
     if (status != 'playing' || !isBotTurn) return;
+    // Opening move: the bot must play its highest double.
+    if (boardEmpty) {
+      final doubles = hands[turn].where((t) => t.isDouble).toList()
+        ..sort((a, b) => b.a.compareTo(a.a));
+      if (doubles.isNotEmpty) {
+        play(turn, doubles.first, 'right');
+        return;
+      }
+    }
     final moves = hands[turn].where(canPlay);
     if (moves.isEmpty) {
       pass(turn);

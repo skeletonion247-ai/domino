@@ -710,13 +710,17 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
           children: [
             icon,
             const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: selected ? _C.navy : _C.skyDeep,
-                fontSize: 13,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 0.8,
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: selected ? _C.navy : _C.skyDeep,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.4,
+                ),
               ),
             ),
           ],

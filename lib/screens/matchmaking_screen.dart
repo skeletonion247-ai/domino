@@ -15,10 +15,15 @@ import '../widgets/score_header.dart';
 import '../widgets/sprite_domino_tile.dart';
 import '../services/ad_service.dart';
 import '../services/player_profile.dart';
+import 'game_screen.dart' show FeltTable;
 
 /// Joins the LAN matchmaker, then shows the authoritative server game.
 class MatchmakingScreen extends StatefulWidget {
-  const MatchmakingScreen({super.key});
+  /// When true (default) the screen connects and queues immediately, hiding
+  /// the account/server setup so the player only sees "finding a match".
+  final bool autoJoin;
+
+  const MatchmakingScreen({super.key, this.autoJoin = true});
 
   @override
   State<MatchmakingScreen> createState() => _MatchmakingScreenState();
@@ -29,7 +34,8 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   final _serverController = TextEditingController();
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
-  int? _userId;
+// ignore: unused_field
+  int? _userId; // kept for future server-profile sync
   String? _authToken;
   String? _authMessage;
   List<Map<String, dynamic>> _leaderboardEntries = [];
@@ -58,6 +64,11 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
     _serverController.text = baseHost.isEmpty
         ? 'domino-server.taild9d968.ts.net'
         : baseHost;
+    if (widget.autoJoin) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _joinQueue();
+      });
+    }
   }
 
   @override
@@ -513,7 +524,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                         ),
                       ),
                       const SizedBox(height: 24),
-                      if (!joining) ...[
+                      if (!widget.autoJoin && !joining) ...[
                         TextField(
                           controller: _nameController,
                           maxLength: 16,
@@ -680,7 +691,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                           style: const TextStyle(color: Colors.red),
                         ),
                       ],
-                      if (!joining)
+                      if (!widget.autoJoin)
                         Padding(
                           padding: const EdgeInsets.only(top: 16),
                           child: TextButton(
@@ -718,9 +729,10 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
               onMenu: _leave,
             ),
             Expanded(
-              child: Stack(
-                clipBehavior: Clip.hardEdge,
-                children: [
+              child: ClipRect(
+                child: Stack(
+                  clipBehavior: Clip.hardEdge,
+                  children: [
                   const Positioned.fill(child: _FeltBackground()),
                   Positioned.fill(
                     child: Padding(
@@ -808,6 +820,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                     ),
                   ),
                 ],
+                ),
               ),
             ),
             if (gameOver)
@@ -910,14 +923,6 @@ class _FeltBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: RadialGradient(
-          center: Alignment(0, -0.2),
-          radius: 1,
-          colors: [Color(0xFF26703F), Color(0xFF17512F), Color(0xFF0A2A19)],
-        ),
-      ),
-    );
+    return const FeltTable();
   }
 }
