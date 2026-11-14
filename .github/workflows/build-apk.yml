@@ -48,7 +48,9 @@ jobs:
         run: |
           cp build/app/outputs/flutter-apk/app-release.apk domino.apk
           gh release view latest >/dev/null 2>&1 || gh release create latest \
-            --title "Latest test build" \
-            --notes "Automatic build from the main branch." \
-            --prerelease
+            --title "Latest build" \
+            --notes "Automatic build from the main branch."
+          # Keep it a normal (non-prerelease) release so
+          # /releases/latest/download/domino.apk always resolves.
+          gh release edit latest --prerelease=false --latest
           gh release upload latest domino.apk --clobber
