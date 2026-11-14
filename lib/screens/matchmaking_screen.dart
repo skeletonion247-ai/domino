@@ -9,6 +9,7 @@ import '../models/game_state.dart';
 import '../models/player.dart';
 import '../theme/arcade_ui.dart';
 import '../widgets/game_board.dart';
+import '../widgets/hand_over_dialog.dart';
 import '../widgets/opponent_seat.dart';
 import '../widgets/player_rack.dart';
 import '../widgets/score_header.dart';
@@ -53,6 +54,13 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   DominoTile? _selected;
   final GlobalKey _boardKey = GlobalKey();
   bool _resultRecorded = false;
+  bool _resultDialogShown = false;
+  String? _lastPlacedId;
+  List<DominoTile>? _localHand;
+  final ValueNotifier<double> _turnProgress = ValueNotifier<double>(1);
+  Timer? _turnTicker;
+  Timer? _passTimer;
+  int _timerTurn = -1;
 
   /// Credits the finished online match to the local profile once.
   @override
@@ -73,6 +81,9 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
 
   @override
   void dispose() {
+    _turnTicker?.cancel();
+    _passTimer?.cancel();
+    _turnProgress.dispose();
     _nameController.dispose();
     _serverController.dispose();
     _usernameController.dispose();
@@ -166,17 +177,42 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
             _phase = 'playing';
             _seat = (message['seat'] as num?)?.toInt() ?? _seat;
             _resultRecorded = false;
+            _resultDialogShown = false;
+            _localHand = null;
+            _timerTurn = -1;
+            _lastPlacedId = null;
           });
+          _turnProgress.value = 1;
           break;
         case 'state':
         case 'gameover':
+          final incomingBoard = message['board'];
+          String? newlyPlaced;
+          if (incomingBoard is List &&
+              incomingBoard.length > _board.length &&
+              incomingBoard.isNotEmpty) {
+            final last = incomingBoard.last;
+            if (last is Map) {
+              newlyPlaced = '${last['a']}-${last['b']}';
+            }
+          }
           setState(() {
             _phase = 'playing';
             _state = message;
             _seat = (message['you'] as num?)?.toInt() ?? _seat;
             _selected = null;
+            if (newlyPlaced != null) _lastPlacedId = newlyPlaced;
           });
-          if (message['type'] == 'gameover') _recordOnlineResult(message);
+          _syncHandOrder();
+          _startTurnTimer(
+            (message['turn'] as num?)?.toInt() ?? -1,
+            message['status']?.toString() ?? 'playing',
+          );
+          _syncAutoPass();
+          if (message['type'] == 'gameover') {
+            _recordOnlineResult(message);
+            _showResultDialog(message);
+          }
           break;
         case 'auth':
           if (message['ok'] == true) {
@@ -214,6 +250,112 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
     } catch (error) {
       _connectionFailed('Could not read the server response: $error');
     }
+  }
+
+  /// Keeps a stable local order for the hand so the player can reorder and
+  /// sort it without fighting every server state update.
+  void _syncHandOrder() {
+    final server = _hand;
+    final previous = _localHand ?? const <DominoTile>[];
+    final kept = [for (final t in previous) if (server.contains(t)) t];
+    final added = [for (final t in server) if (!kept.contains(t)) t];
+    _localHand = [...kept, ...added];
+  }
+
+  void _sortHand() {
+    setState(() {
+      final hand = [...(_localHand ?? _hand)];
+      hand.sort((a, b) {
+        if (a.isDouble != b.isDouble) return a.isDouble ? -1 : 1;
+        final byPips = (b.top + b.bottom).compareTo(a.top + a.bottom);
+        return byPips != 0 ? byPips : a.top.compareTo(b.top);
+      });
+      _localHand = hand;
+    });
+  }
+
+  void _reorderHand(int oldIndex, int newIndex) {
+    setState(() {
+      final hand = [...(_localHand ?? _hand)];
+      if (oldIndex < 0 || oldIndex >= hand.length) return;
+      final tile = hand.removeAt(oldIndex);
+      hand.insert(newIndex.clamp(0, hand.length), tile);
+      _localHand = hand;
+    });
+  }
+
+  /// A fresh 20s visual timer for the active seat.
+  void _startTurnTimer(int turn, String status) {
+    if (status != 'playing') {
+      _turnTicker?.cancel();
+      _turnProgress.value = 0;
+      return;
+    }
+    if (turn == _timerTurn) return;
+    _timerTurn = turn;
+    _turnTicker?.cancel();
+    _turnProgress.value = 1;
+    var elapsed = 0.0;
+    _turnTicker = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      elapsed += 0.1;
+      final value = (1 - elapsed / 20).clamp(0.0, 1.0);
+      _turnProgress.value = value;
+      if (value > 0) return;
+      timer.cancel();
+      // Time is up on your turn: auto-play a legal tile, otherwise pass.
+      if (!mounted || !_myTurn) return;
+      final playable = _playable;
+      if (playable.isEmpty) {
+        _send({'type': 'pass'});
+      } else {
+        final tile = playable.first;
+        final fitsLeft = _left >= 0 && tile.matches(_left);
+        _play(tile, fitsLeft ? 'left' : 'right');
+      }
+    });
+  }
+
+  /// Passing is automatic when the player has no legal tile.
+  void _syncAutoPass() {
+    _passTimer?.cancel();
+    if (!_myTurn || _playable.isNotEmpty) return;
+    _passTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (!mounted || !_myTurn || _playable.isNotEmpty) return;
+      _send({'type': 'pass'});
+    });
+  }
+
+  void _showResultDialog(Map<String, dynamic> message) {
+    if (_resultDialogShown) return;
+    final scores = message['scores'] as List?;
+    if (scores == null || scores.length < 2) return;
+    _resultDialogShown = true;
+    final s0 = (scores[0] as num).toInt();
+    final s1 = (scores[1] as num).toInt();
+    final winner = s0 >= 100 ? 0 : (s1 >= 100 ? 1 : -1);
+    if (winner < 0) return;
+    final myTeam = _seat < 0 ? 0 : _seat % 2;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => HandOverDialog(
+        isWin: myTeam == winner,
+        isGameOver: true,
+        winningTeam: winner,
+        points: winner == 0 ? s0 : s1,
+        team1Score: s0,
+        team2Score: s1,
+        targetScore: 100,
+        onPrimary: () {
+          Navigator.pop(ctx);
+          _leave();
+        },
+        onMenu: () {
+          Navigator.pop(ctx);
+          _leave();
+        },
+      ),
+    );
   }
 
   void _recordOnlineResult(Map<String, dynamic> message) {
@@ -721,12 +863,15 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            ScoreHeader(
-              team1Score: (scores[0] as num).toInt(),
-              team2Score: (scores[1] as num).toInt(),
-              targetScore: 100,
-              turnFraction: 1,
-              onMenu: _leave,
+            ValueListenableBuilder<double>(
+              valueListenable: _turnProgress,
+              builder: (context, progress, _) => ScoreHeader(
+                team1Score: (scores[0] as num).toInt(),
+                team2Score: (scores[1] as num).toInt(),
+                targetScore: 100,
+                turnFraction: progress,
+                onMenu: _leave,
+              ),
             ),
             Expanded(
               child: ClipRect(
@@ -734,6 +879,26 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                   clipBehavior: Clip.hardEdge,
                   children: [
                   const Positioned.fill(child: _FeltBackground()),
+                  Positioned.fill(
+                    child: DragTarget<DominoTile>(
+                      onWillAcceptWithDetails: (details) =>
+                          _myTurn && _playable.contains(details.data),
+                      onAcceptWithDetails: (details) {
+                        final tile = details.data;
+                        final fitsLeft = _left >= 0 && tile.matches(_left);
+                        final fitsRight = _right >= 0 && tile.matches(_right);
+                        final side = fitsLeft && fitsRight
+                            ? (details.offset.dx <
+                                    MediaQuery.sizeOf(context).width / 2
+                                ? 'left'
+                                : 'right')
+                            : (fitsLeft ? 'left' : 'right');
+                        _play(tile, side);
+                      },
+                      builder: (context, candidate, rejected) =>
+                          const SizedBox.expand(),
+                    ),
+                  ),
                   Positioned.fill(
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(44, 68, 44, 32),
@@ -749,12 +914,33 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                                   required horizontal,
                                   required isFlipped,
                                   required scale,
-                                }) => SpriteDominoTile(
-                                  tile: tile,
-                                  horizontal: horizontal,
-                                  isFlipped: isFlipped,
-                                  scale: scale,
-                                ),
+                                }) {
+                                  Widget face = SpriteDominoTile(
+                                    tile: tile,
+                                    horizontal: horizontal,
+                                    isFlipped: isFlipped,
+                                    scale: scale,
+                                  );
+                                  if ('${tile.top}-${tile.bottom}' ==
+                                      _lastPlacedId) {
+                                    face = TweenAnimationBuilder<double>(
+                                      tween: Tween<double>(begin: 0, end: 1),
+                                      duration: const Duration(
+                                        milliseconds: 260,
+                                      ),
+                                      curve: Curves.easeOutBack,
+                                      builder: (context, t, child) => Opacity(
+                                        opacity: t.clamp(0.0, 1.0),
+                                        child: Transform.scale(
+                                          scale: 0.7 + 0.3 * t,
+                                          child: child,
+                                        ),
+                                      ),
+                                      child: face,
+                                    );
+                                  }
+                                  return face;
+                                },
                           ),
                           ..._endTargets(),
                         ],
@@ -873,14 +1059,17 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                     child: const Text('PASS TURN'),
                   ),
                 ),
-              PlayerRack(
-                hand: _hand,
-                playable: _playable,
-                isMyTurn: _myTurn,
-                turnFraction: 1,
-                onTileTap: _onTileTap,
-                onSort: () {},
-                onReorder: (oldIndex, newIndex) {},
+              ValueListenableBuilder<double>(
+                valueListenable: _turnProgress,
+                builder: (context, progress, _) => PlayerRack(
+                  hand: _localHand ?? _hand,
+                  playable: _playable,
+                  isMyTurn: _myTurn,
+                  turnFraction: progress,
+                  onTileTap: _onTileTap,
+                  onSort: _sortHand,
+                  onReorder: _reorderHand,
+                ),
               ),
             ],
           ],
@@ -902,11 +1091,15 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
       team: seat % 2,
       hand: List.generate(handCount, (_) => const DominoTile(0, 0)),
     );
-    return OpponentSeat(
-      player: player,
-      playerIndex: seat,
-      isCurrentTurn: _turn == seat,
-      direction: direction,
+    return ValueListenableBuilder<double>(
+      valueListenable: _turnProgress,
+      builder: (context, progress, _) => OpponentSeat(
+        player: player,
+        playerIndex: seat,
+        isCurrentTurn: _turn == seat,
+        turnProgress: _turn == seat ? progress : 1,
+        direction: direction,
+      ),
     );
   }
 
