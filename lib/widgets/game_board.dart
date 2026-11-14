@@ -851,7 +851,8 @@ void _addSide(
       if (turning) {
         dir = nextDir;
         turns++;
-        segLeft = 4.0;
+        // Vertical runs are 3 tiles; horizontal runs stay 4.
+        segLeft = (nextDir == 1 || nextDir == 3) ? 3.0 : 4.0;
       }
     }
 
@@ -1003,7 +1004,7 @@ class GameBoard extends StatelessWidget {
                 child: Container(
                   decoration: BoxDecoration(
                     border: Border.all(
-                      color: const Color(0xFFFF5252),
+                      color: const Color(0x332E94EA),
                       width: 1,
                     ),
                   ),

@@ -29,8 +29,8 @@ class PlayerRack extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 117,
-      margin: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+      height: 100,
+      margin: const EdgeInsets.fromLTRB(8, 0, 8, 0),
       child: Stack(
         clipBehavior: Clip.none,
         children: [
@@ -62,8 +62,8 @@ class PlayerRack extends StatelessWidget {
           Positioned(
             left: 56,
             right: 12,
-            top: 0,
-            bottom: 6,
+            top: 2,
+            bottom: 2,
             child: hand.isEmpty
                 ? const Center(
                     child: Text(
@@ -82,7 +82,7 @@ class PlayerRack extends StatelessWidget {
           ),
           Positioned(
             left: 6,
-            top: 6,
+            top: -32,
             child: SizedBox(
               width: 44,
               height: 44,
@@ -185,9 +185,9 @@ class _SmoothHandState extends State<_SmoothHand> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final n = widget.hand.length;
-        final scale = ((constraints.maxWidth / n - 4) / 60)
-            .clamp(0.25, 0.8)
-            .toDouble();
+        final scale =
+            ((constraints.maxWidth / n - 4) / 60).clamp(0.25, 0.67)
+                .toDouble();
         final tileW = 60 * scale;
         final tileH = 130 * scale;
         final slotW = tileW + 4;

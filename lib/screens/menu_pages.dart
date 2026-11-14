@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/player_profile.dart';
 import '../widgets/menu_ui.dart';
 
 // ---------------------------------------------------------------------------
@@ -146,24 +147,29 @@ class _RowTile extends StatelessWidget {
 class RanksPage extends StatelessWidget {
   const RanksPage({super.key});
 
-  static const _players = <List<Object>>[
-    [1, 'NOVA', 'MASTER', 4820],
-    [2, 'RAVEN', 'MASTER', 4610],
-    [3, 'KAI', 'DIAMOND', 4390],
-    [4, 'LUNA', 'DIAMOND', 4180],
-    [5, 'ORION', 'DIAMOND', 4055],
-    [6, 'MILA', 'PLATINUM', 3870],
-    [7, 'ZEUS', 'PLATINUM', 3760],
-    [8, 'IRIS', 'PLATINUM', 3620],
-    [9, 'FELIX', 'GOLD', 3480],
-    [10, 'SAGE', 'GOLD', 3355],
-    [11, 'REX', 'GOLD', 3120],
-    [12, 'YOU', 'GOLD', 2980],
-  ];
+  static List<List<Object>> _rows(PlayerProfile p) => [
+        [1, 'NOVA', 'MASTER', 4820],
+        [2, 'RAVEN', 'MASTER', 4610],
+        [3, 'KAI', 'DIAMOND', 4390],
+        [4, 'LUNA', 'DIAMOND', 4180],
+        [5, 'ORION', 'DIAMOND', 4055],
+        [6, 'MILA', 'PLATINUM', 3870],
+        [7, 'ZEUS', 'PLATINUM', 3760],
+        [8, 'IRIS', 'PLATINUM', 3620],
+        [9, 'FELIX', 'GOLD', 3480],
+        [10, 'SAGE', 'GOLD', 3355],
+        [11, 'REX', 'GOLD', 3120],
+        [12, p.name, 'GOLD', 1500 + p.wins * 120 - p.losses * 30],
+      ];
 
   @override
   Widget build(BuildContext context) {
-    return MenuScaffold(
+    return ListenableBuilder(
+      listenable: PlayerProfile.instance,
+      builder: (context, _) {
+        final me = PlayerProfile.instance.name;
+        final rows = _rows(PlayerProfile.instance);
+        return MenuScaffold(
       title: 'RANKS',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -178,14 +184,14 @@ class RanksPage extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
             child: Column(
               children: [
-                for (final p in _players)
+                for (final p in rows)
                   Builder(
                     builder: (context) {
                       final rank = p[0] as int;
                       final name = p[1] as String;
                       final tier = p[2] as String;
                       final points = p[3] as int;
-                      final isMe = name == 'YOU';
+                      final isMe = name == me;
                       final medal = rank == 1
                           ? MenuColors.gold
                           : rank == 2
@@ -237,6 +243,8 @@ class RanksPage extends StatelessWidget {
         ],
       ),
     );
+      },
+    );
   }
 }
 
@@ -265,6 +273,7 @@ class _MissionsPageState extends State<MissionsPage> {
     final m = _missions[index];
     if (!m.complete || m.claimed) return;
     setState(() => m.claimed = true);
+    PlayerProfile.instance.addCoins(int.tryParse(m.reward) ?? 0);
     _toast(context, 'Claimed ${m.reward} coins');
   }
 
@@ -634,12 +643,132 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  bool _sound = true;
-  bool _music = true;
-  bool _vibration = true;
-  bool _hints = false;
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: PlayerProfile.instance,
+      builder: (context, _) {
+        final p = PlayerProfile.instance;
+        return _settingsBody(p);
+      },
+    );
+  }
 
-  Widget _toggle(String title, String subtitle, bool value, ValueChanged<bool> onChanged) {
+  Widget _settingsBody(PlayerProfile p) {
+    return MenuScaffold(
+      title: 'SETTINGS',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const _PageHeader(
+            title: 'GAME SETTINGS',
+            subtitle: 'Sound, feedback and table options',
+          ),
+          const SizedBox(height: 14),
+          const MenuSectionLabel('AUDIO & FEEDBACK'),
+          MenuPanel(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            child: Column(
+              children: [
+                _toggle('Sound effects', 'Tiles, buttons and score', p.sound,
+                    p.setSound),
+                _toggle('Music', 'Menu and table soundtrack', p.music,
+                    p.setMusic),
+                _toggle('Vibration', 'Haptic feedback on plays', p.vibration,
+                    p.setVibration),
+                _toggle('Show hints', 'Highlight playable tiles', p.hints,
+                    p.setHints),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          const MenuSectionLabel('DATA'),
+          MenuPanel(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            child: Column(
+              children: [
+                _RowTile(
+                  leading: const Icon(
+                    Icons.storage_rounded,
+                    color: MenuColors.aquaDeep,
+                    size: 26,
+                  ),
+                  title: 'Clear local data',
+                  subtitle: 'Removes settings and cached sprites',
+                  trailing: SizedBox(
+                    width: 68,
+                    child: MenuPressButton(
+                      onTap: () => _toast(context, 'Cache cleared'),
+                      height: 30,
+                      depth: 4,
+                      radius: 10,
+                      faceColors: const [Colors.white, MenuColors.frost],
+                      edgeColor: MenuColors.frostEdge,
+                      child: const Text(
+                        'CLEAR',
+                        style: TextStyle(
+                          color: MenuColors.navy,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                _RowTile(
+                  leading: const Icon(
+                    Icons.restart_alt_rounded,
+                    color: MenuColors.red,
+                    size: 28,
+                  ),
+                  title: 'Reset progress',
+                  subtitle: 'Clear wins, streak and missions',
+                  trailing: SizedBox(
+                    width: 68,
+                    child: MenuPressButton(
+                      onTap: _reset,
+                      height: 30,
+                      depth: 4,
+                      radius: 10,
+                      faceColors: const [Color(0xFFFF8A80), MenuColors.red],
+                      edgeColor: const Color(0xFF8E1B1B),
+                      child: const Text(
+                        'RESET',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Center(
+            child: Text(
+              'DOMINO BATTLE ARENA  ·  v1.0',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.8),
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1.2,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _toggle(
+    String title,
+    String subtitle,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       padding: const EdgeInsets.fromLTRB(12, 7, 6, 7),
@@ -725,117 +854,8 @@ class _SettingsPageState extends State<SettingsPage> {
       _toast(context, 'Progress reset');
     }
   }
-
-  @override
-  Widget build(BuildContext context) {
-    return MenuScaffold(
-      title: 'SETTINGS',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const _PageHeader(
-            title: 'GAME SETTINGS',
-            subtitle: 'Sound, feedback and table options',
-          ),
-          const SizedBox(height: 14),
-          const MenuSectionLabel('AUDIO & FEEDBACK'),
-          MenuPanel(
-            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-            child: Column(
-              children: [
-                _toggle('Sound effects', 'Tiles, buttons and score', _sound,
-                    (v) => setState(() => _sound = v)),
-                _toggle('Music', 'Menu and table soundtrack', _music,
-                    (v) => setState(() => _music = v)),
-                _toggle('Vibration', 'Haptic feedback on plays', _vibration,
-                    (v) => setState(() => _vibration = v)),
-                _toggle('Show hints', 'Highlight playable tiles', _hints,
-                    (v) => setState(() => _hints = v)),
-              ],
-            ),
-          ),
-          const SizedBox(height: 14),
-          const MenuSectionLabel('DATA'),
-          MenuPanel(
-            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-            child: Column(
-              children: [
-                _RowTile(
-                  leading: const Icon(
-                    Icons.storage_rounded,
-                    color: MenuColors.aquaDeep,
-                    size: 26,
-                  ),
-                  title: 'Clear local data',
-                  subtitle: 'Removes settings and cached sprites',
-                  trailing: SizedBox(
-                    width: 68,
-                    child: MenuPressButton(
-                      onTap: () => _toast(context, 'Cache cleared'),
-                      height: 30,
-                      depth: 4,
-                      radius: 10,
-                      faceColors: const [Colors.white, MenuColors.frost],
-                      edgeColor: MenuColors.frostEdge,
-                      child: const Text(
-                        'CLEAR',
-                        style: TextStyle(
-                          color: MenuColors.navy,
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                _RowTile(
-                  leading: const Icon(
-                    Icons.restart_alt_rounded,
-                    color: MenuColors.red,
-                    size: 28,
-                  ),
-                  title: 'Reset progress',
-                  subtitle: 'Clear wins, streak and missions',
-                  trailing: SizedBox(
-                    width: 68,
-                    child: MenuPressButton(
-                      onTap: _reset,
-                      height: 30,
-                      depth: 4,
-                      radius: 10,
-                      faceColors: const [Color(0xFFFF8A80), MenuColors.red],
-                      edgeColor: const Color(0xFF8E1B1B),
-                      child: const Text(
-                        'RESET',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          Center(
-            child: Text(
-              'DOMINO BATTLE ARENA  ·  v1.0',
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.8),
-                fontSize: 10,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 1.2,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
+
 
 // ---------------------------------------------------------------------------
 // Profile
@@ -849,10 +869,10 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
-  String _name = 'PLAYER';
-
   Future<void> _editName() async {
-    final controller = TextEditingController(text: _name);
+    final controller = TextEditingController(
+      text: PlayerProfile.instance.name,
+    );
     final name = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -891,13 +911,17 @@ class _ProfilePageState extends State<ProfilePage> {
       ),
     );
     if (name != null && name.isNotEmpty && mounted) {
-      setState(() => _name = name.toUpperCase());
+      PlayerProfile.instance.setName(name);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return MenuScaffold(
+    return ListenableBuilder(
+      listenable: PlayerProfile.instance,
+      builder: (context, _) {
+        final p = PlayerProfile.instance;
+        return MenuScaffold(
       title: 'PROFILE',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -908,9 +932,9 @@ class _ProfilePageState extends State<ProfilePage> {
               children: [
                 Row(
                   children: [
-                    const MenuAvatar(
-                      initial: 'P',
-                      color: MenuColors.aquaDeep,
+                    MenuAvatar(
+                      initial: p.initial,
+                      color: p.avatar.color,
                       size: 64,
                       ring: true,
                     ),
@@ -920,7 +944,7 @@ class _ProfilePageState extends State<ProfilePage> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            _name,
+                            p.name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -931,8 +955,8 @@ class _ProfilePageState extends State<ProfilePage> {
                             ),
                           ),
                           const SizedBox(height: 3),
-                          const Text(
-                            'GOLD III  ·  LEVEL 15',
+                          Text(
+                            'GOLD III  ·  LEVEL ${p.level}',
                             style: TextStyle(
                               color: MenuColors.goldEdge,
                               fontSize: 11,
@@ -941,10 +965,10 @@ class _ProfilePageState extends State<ProfilePage> {
                             ),
                           ),
                           const SizedBox(height: 6),
-                          const MenuProgress(value: 0.62, height: 8),
+                          MenuProgress(value: p.xpFraction, height: 8),
                           const SizedBox(height: 4),
                           Text(
-                            '1,240 / 2,000 XP',
+                            '${p.xp} / ${p.xpGoal} XP',
                             style: TextStyle(
                               color: MenuColors.navy.withValues(alpha: 0.6),
                               fontSize: 9.5,
@@ -978,18 +1002,42 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
           ),
           const SizedBox(height: 14),
+          const MenuSectionLabel('AVATAR'),
+          MenuPanel(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              alignment: WrapAlignment.center,
+              children: [
+                for (var i = 0; i < kAvatars.length; i++)
+                  GestureDetector(
+                    onTap: () => p.setAvatar(i),
+                    child: MenuAvatar(
+                      initial: p.name.isEmpty ? '?' : p.name[0].toUpperCase(),
+                      color: kAvatars[i].color,
+                      size: 46,
+                      ring: i == p.avatarIndex,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
           const MenuSectionLabel('STATS'),
           MenuPanel(
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: Row(
-              children: const [
-                _ProfileStat('6', 'WINS', MenuColors.greenDeep),
-                _ProfileDivider(),
-                _ProfileStat('2', 'LOSSES', MenuColors.pink),
-                _ProfileDivider(),
-                _ProfileStat('3', 'STREAK', Color(0xFFF57C00)),
-                _ProfileDivider(),
-                _ProfileStat('#12', 'RANK', MenuColors.aquaDeep),
+              children: [
+                _ProfileStat('${p.wins}', 'WINS', MenuColors.greenDeep),
+                const _ProfileDivider(),
+                _ProfileStat('${p.losses}', 'LOSSES', MenuColors.pink),
+                const _ProfileDivider(),
+                _ProfileStat(
+                    '${p.bestStreak}', 'STREAK', const Color(0xFFF57C00)),
+                const _ProfileDivider(),
+                _ProfileStat('#${12 - p.wins.clamp(0, 11)}', 'RANK',
+                    MenuColors.aquaDeep),
               ],
             ),
           ),
@@ -1008,6 +1056,8 @@ class _ProfilePageState extends State<ProfilePage> {
           ),
         ],
       ),
+    );
+      },
     );
   }
 }

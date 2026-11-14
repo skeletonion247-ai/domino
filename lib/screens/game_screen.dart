@@ -1002,7 +1002,7 @@ class _GameScreenState extends State<GameScreen>
                     // The domino board.
                     Positioned.fill(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(42, 50, 42, 28),
+                        padding: const EdgeInsets.fromLTRB(42, 39, 42, 11),
                         child: Stack(
                           clipBehavior: Clip.none,
                           children: [
@@ -1108,18 +1108,33 @@ class _Felt extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         Image.asset(
-          'assets/ui/table_wood.jpg',
+          'assets/ui/table_light_blue.jpg',
           fit: BoxFit.cover,
           filterQuality: FilterQuality.medium,
+          errorBuilder: (context, error, stack) => const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Color(0xFF8FDFFF),
+                  Color(0xFF5BBAF0),
+                  Color(0xFF2E94EA),
+                  Color(0xFF1E6FC4),
+                ],
+                stops: [0.0, 0.35, 0.7, 1.0],
+              ),
+            ),
+          ),
         ),
-        // Warm light so the wood reads lighter and the table feels lit.
+        // Soft white glow keeps the table bright.
         const DecoratedBox(
           decoration: BoxDecoration(
             gradient: RadialGradient(
-              center: Alignment(0, -0.3),
+              center: Alignment(0, -0.25),
               radius: 1.0,
-              colors: [Color(0x26FFE9C9), Color(0x0AFFE9C9), Color(0x00000000)],
-              stops: [0.0, 0.55, 1.0],
+              colors: [Color(0x16FFFFFF), Color(0x08FFFFFF), Color(0x00FFFFFF)],
+              stops: [0.0, 0.5, 1.0],
             ),
           ),
         ),
@@ -1128,17 +1143,17 @@ class _Felt extends StatelessWidget {
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [Color(0x18FFFFFF), Color(0x00FFFFFF), Color(0x33000000)],
-              stops: [0.0, 0.5, 1.0],
+              colors: [Color(0x10FFFFFF), Color(0x00FFFFFF), Color(0x140B2A5B)],
+              stops: [0.0, 0.55, 1.0],
             ),
           ),
         ),
         const DecoratedBox(
           decoration: BoxDecoration(
             gradient: RadialGradient(
-              radius: 0.98,
-              colors: [Color(0x00000000), Color(0x66000000)],
-              stops: [0.5, 1.0],
+              radius: 1.0,
+              colors: [Color(0x00000000), Color(0x160B2A5B)],
+              stops: [0.65, 1.0],
             ),
           ),
         ),

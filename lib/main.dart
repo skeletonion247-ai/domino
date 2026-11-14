@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
+
+import 'services/player_profile.dart';
 import 'theme/app_theme.dart';
 import 'screens/main_menu.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await PlayerProfile.instance.load();
   runApp(const DominoApp());
 }
 

@@ -4,8 +4,10 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../models/domino_tile.dart';
+import '../services/player_profile.dart';
 import '../widgets/sprite_domino_tile.dart';
 import 'game_screen.dart';
+import 'matchmaking_screen.dart';
 import 'menu_pages.dart';
 
 class _C {
@@ -40,7 +42,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   late final AnimationController _float;
   late final AnimationController _shine;
 
-  int _mode = 0; // 0 = 2v2 Teams, 1 = 1v1
+  bool _vsBots = false; // false = online 2v2 teams, true = practice vs bots
   int _rule = 0; // 0 = Block, 1 = Draw, 2 = All Fives
 
   @override
@@ -68,16 +70,20 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  void _openGame() {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => const GameScreen()));
+  void _openPage(Widget page) {
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
   }
 
-  void _openPage(Widget page) {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute(builder: (_) => page));
+  void _openGame() {
+    if (_vsBots) {
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const GameScreen(autoPlay: false)),
+      );
+    } else {
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const MatchmakingScreen()),
+      );
+    }
   }
 
   void _showMessage(String message) {
@@ -139,6 +145,8 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   }
 
   Widget _storeRow(String label, String asset, String amount, double price) {
+    final coins = label == 'COINS' ? 1000 : 0;
+    final gems = label == 'GEMS' ? 60 : 0;
     return Container(
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
@@ -179,6 +187,8 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
             child: _PressButton(
               onTap: () {
                 Navigator.of(context).pop();
+                PlayerProfile.instance.addCoins(coins);
+                PlayerProfile.instance.addGems(gems);
                 _showMessage('$label pack purchased');
               },
               height: 38,
@@ -288,19 +298,37 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => _openPage(const ProfilePage()),
-              child: _buildProfileCard(),
+              child: ListenableBuilder(
+                listenable: PlayerProfile.instance,
+                builder: (context, _) => _buildProfileCard(),
+              ),
             ),
           ),
           const SizedBox(width: 8),
-          _currencyPill('assets/ui/icon_ico_coin.png', '1,250', _openStore),
+          ListenableBuilder(
+            listenable: PlayerProfile.instance,
+            builder: (context, _) => _currencyPill(
+              'assets/ui/icon_ico_coin.png',
+              PlayerProfile.instance.formattedCoins,
+              _openStore,
+            ),
+          ),
           const SizedBox(width: 6),
-          _currencyPill('assets/ui/icon_ico_gem.png', '112', _openStore),
+          ListenableBuilder(
+            listenable: PlayerProfile.instance,
+            builder: (context, _) => _currencyPill(
+              'assets/ui/icon_ico_gem.png',
+              '${PlayerProfile.instance.gems}',
+              _openStore,
+            ),
+          ),
         ],
       ),
     );
   }
 
   Widget _buildProfileCard() {
+    final profile = PlayerProfile.instance;
     return _Panel(
       radius: 20,
       padding: const EdgeInsets.fromLTRB(6, 6, 12, 6),
@@ -363,9 +391,9 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
                       borderRadius: BorderRadius.circular(9),
                       border: Border.all(color: _C.gold, width: 1.5),
                     ),
-                    child: const Text(
-                      '15',
-                      style: TextStyle(
+                    child: Text(
+                      '${profile.level}',
+                      style: const TextStyle(
                         color: _C.gold,
                         fontSize: 10,
                         fontWeight: FontWeight.w900,
@@ -383,9 +411,9 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'PLAYER',
-                  style: TextStyle(
+                Text(
+                  profile.name,
+                  style: const TextStyle(
                     color: _C.navy,
                     fontSize: 13,
                     fontWeight: FontWeight.w900,
@@ -403,7 +431,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
                   child: Align(
                     alignment: Alignment.centerLeft,
                     child: FractionallySizedBox(
-                      widthFactor: 0.62,
+                      widthFactor: profile.xpFraction,
                       child: Container(
                         decoration: const BoxDecoration(
                           gradient: LinearGradient(
@@ -416,7 +444,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  '1,240 / 2,000 XP',
+                  '${profile.xp} / ${profile.xpGoal} XP',
                   style: TextStyle(
                     color: _C.navy.withValues(alpha: 0.6),
                     fontSize: 9.5,
@@ -607,7 +635,10 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
             ],
           ),
           const SizedBox(height: 12),
-          _buildStats(),
+          ListenableBuilder(
+            listenable: PlayerProfile.instance,
+            builder: (context, _) => _buildStats(),
+          ),
         ],
       ),
     );
@@ -620,20 +651,36 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
       child: Row(
         children: [
           Expanded(
-            child: _modeTab(0, 'assets/ui/icon_ico_white_tiles.png', '2 v 2 TEAMS'),
+            child: _modeTab(
+              0,
+              Image.asset(
+                'assets/ui/icon_ico_white_tiles.png',
+                width: 20,
+                height: 20,
+              ),
+              '2 v 2 ONLINE',
+            ),
           ),
           Expanded(
-            child: _modeTab(1, 'assets/ui/icon_ico_mode_fast.png', '1 v 1 DUEL'),
+            child: _modeTab(
+              1,
+              const Icon(
+                Icons.smart_toy_rounded,
+                color: _C.navy,
+                size: 20,
+              ),
+              'PRACTICE VS BOTS',
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _modeTab(int index, String icon, String label) {
-    final selected = _mode == index;
+  Widget _modeTab(int index, Widget icon, String label) {
+    final selected = (_vsBots ? 1 : 0) == index;
     return GestureDetector(
-      onTap: () => setState(() => _mode = index),
+      onTap: () => setState(() => _vsBots = index == 1),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic,
@@ -661,7 +708,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Image.asset(icon, width: 20, height: 20),
+            icon,
             const SizedBox(width: 6),
             Text(
               label,
@@ -709,16 +756,17 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   }
 
   Widget _buildStats() {
+    final profile = PlayerProfile.instance;
     return _Panel(
       radius: 18,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
       child: Row(
         children: [
-          _stat('6', 'WINS', _C.greenDeep),
+          _stat('${profile.wins}', 'WINS', _C.greenDeep),
           _statDivider(),
-          _stat('2', 'LOSSES', _C.pink),
+          _stat('${profile.losses}', 'LOSSES', _C.pink),
           _statDivider(),
-          _stat('3', 'STREAK', const Color(0xFFF57C00)),
+          _stat('${profile.bestStreak}', 'STREAK', const Color(0xFFF57C00)),
         ],
       ),
     );
@@ -850,7 +898,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   }
 
   Widget _buildNavRow() {
-    final modeLabel = _mode == 0 ? '2V2' : '1V1';
+    final modeLabel = _vsBots ? 'BOTS' : '2V2';
     const ruleLabels = ['BLOCK', 'DRAW', 'FIVES'];
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -940,10 +988,27 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   }
 }
 
-// -----------------------------------------------------------------------
-// Shared pieces
-// -----------------------------------------------------------------------
+/// Static section label for the main menu (not inside menu_ui context).
+class MenuSectionLabelStatic extends StatelessWidget {
+  final String text;
 
+  const MenuSectionLabelStatic(this.text, {super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: const TextStyle(
+        color: _C.navy,
+        fontSize: 11,
+        fontWeight: FontWeight.w900,
+        letterSpacing: 2,
+      ),
+    );
+  }
+}
+
+/// Icon + two-line label used inside the mode chooser buttons.
 Matrix4 _perspective({double rx = 0, double ry = 0}) {
   return Matrix4.identity()
     ..setEntry(3, 2, 0.0014)

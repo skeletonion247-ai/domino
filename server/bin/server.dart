@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'package:crypto/crypto.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 const int kTargetScore = 100;
 const int kPlayersPerRoom = 4;
@@ -41,6 +43,8 @@ class Client {
   int? seat;
   Room? room;
   bool inQueue = false;
+  int? userId;
+  String? token;
 
   Client(this.socket, this.name);
 
@@ -68,6 +72,8 @@ class Room {
   int passes = 0;
   String status = 'playing';
   String? lastMessage;
+  int? winningTeam;
+  bool matchRecorded = false;
 
   Room(this.id, List<Client?> seats) : seats = List.of(seats) {
     for (var i = 0; i < seats.length; i++) {
@@ -230,6 +236,7 @@ class Room {
     scores[team] += points;
     if (scores[team] >= kTargetScore) {
       status = 'gameover';
+      winningTeam = team;
       lastMessage = 'Team ${team + 1} wins';
       return;
     }
@@ -278,9 +285,55 @@ class Server {
   int _nextRoom = 1;
   Timer? _matchmakingTimer;
   DateTime? _matchDeadline;
+  late Database db;
+
+  void _initDb() {
+    final path = Platform.environment['DB_PATH'] ?? 'data/domino.db';
+    final dir = Directory(path).parent;
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    db = sqlite3.open(path);
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS stats (
+        user_id INTEGER PRIMARY KEY,
+        games_played INTEGER NOT NULL DEFAULT 0,
+        wins INTEGER NOT NULL DEFAULT 0,
+        losses INTEGER NOT NULL DEFAULT 0,
+        total_score INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS matches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id INTEGER NOT NULL,
+        winner_team INTEGER NOT NULL,
+        scores TEXT NOT NULL,
+        played_at TEXT NOT NULL
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS wallet (
+        user_id INTEGER PRIMARY KEY,
+        coins INTEGER NOT NULL DEFAULT 0,
+        gems INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+    ''');
+    stdout.writeln('Database ready: $path');
+  }
 
   Future<void> start(int port) async {
+    _initDb();
     final server = await HttpServer.bind(InternetAddress.anyIPv4, port);
+    server.autoCompress = true;
     stdout.writeln('Domino server listening on port $port');
     await for (final request in server) {
       if (request.uri.path == '/health') {
@@ -293,12 +346,63 @@ class Server {
       if (WebSocketTransformer.isUpgradeRequest(request)) {
         final socket = await WebSocketTransformer.upgrade(request);
         _onSocket(socket);
-      } else {
-        request.response
-          ..statusCode = 404
-          ..write('Domino server. Connect with a WebSocket.');
-        await request.response.close();
+        continue;
       }
+      await _serveStatic(request);
+    }
+  }
+
+  Future<void> _serveStatic(HttpRequest request) async {
+    final root = Platform.environment['STATIC_DIR'] ?? 'web';
+    var path = request.uri.path;
+    if (path == '/' || path.isEmpty) path = '/index.html';
+    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+    if (segments.any((s) => s == '..' || s.contains('\\\\'))) {
+      request.response.statusCode = 400;
+      await request.response.close();
+      return;
+    }
+    var file = File('$root/${segments.join('/')}');
+    if (!await file.exists()) {
+      file = File('$root/index.html');
+      if (!await file.exists()) {
+        request.response.statusCode = 404;
+        request.response.write('Not found');
+        await request.response.close();
+        return;
+      }
+    }
+    final ext = path.split('.').last.toLowerCase();
+    request.response.headers.contentType = _contentType(ext);
+    await request.response.addStream(file.openRead());
+    await request.response.close();
+  }
+
+  ContentType _contentType(String ext) {
+    switch (ext) {
+      case 'html':
+        return ContentType.html;
+      case 'js':
+        return ContentType('application', 'javascript', charset: 'utf-8');
+      case 'css':
+        return ContentType('text', 'css', charset: 'utf-8');
+      case 'json':
+        return ContentType.json;
+      case 'png':
+        return ContentType('image', 'png');
+      case 'jpg':
+      case 'jpeg':
+        return ContentType('image', 'jpeg');
+      case 'svg':
+        return ContentType('image', 'svg+xml');
+      case 'ico':
+        return ContentType('image', 'x-icon');
+      case 'wasm':
+        return ContentType('application', 'wasm');
+      case 'txt':
+        return ContentType.text;
+      default:
+        return ContentType.binary;
     }
   }
 
@@ -322,6 +426,21 @@ class Server {
 
     try {
       switch (message['type']) {
+        case 'register':
+          _register(client, message);
+          break;
+        case 'login':
+          _login(client, message);
+          break;
+        case 'leaderboard':
+          _leaderboard(client);
+          break;
+        case 'wallet':
+          _wallet(client);
+          break;
+        case 'ad_reward':
+          _adReward(client, message);
+          break;
         case 'join':
           _join(client, message);
           break;
@@ -347,9 +466,11 @@ class Server {
 
   void _join(Client client, Map<String, dynamic> message) {
     if (client.inQueue || client.room != null) return;
-    final raw = (message['name'] as String?)?.trim() ?? '';
-    client.name =
-        raw.isEmpty ? 'Player' : raw.substring(0, min(raw.length, 16));
+    if (client.userId == null) {
+      final raw = (message['name'] as String?)?.trim() ?? '';
+      client.name =
+          raw.isEmpty ? 'Player' : raw.substring(0, min(raw.length, 16));
+    }
     client.inQueue = true;
     queue.add(client);
     _startMatchmakingClock();
@@ -444,6 +565,163 @@ class Server {
     _notifyQueue();
   }
 
+  String _hashPassword(String password) {
+    final bytes = utf8.encode('domino-salt:$password');
+    return sha256.convert(bytes).toString();
+  }
+
+  String _generateToken() {
+    return '${Random().nextInt(1 << 32).toRadixString(16)}'
+        '${Random().nextInt(1 << 32).toRadixString(16)}';
+  }
+
+  void _register(Client client, Map<String, dynamic> message) {
+    final username = (message['username'] as String?)?.trim() ?? '';
+    final password = (message['password'] as String?) ?? '';
+    if (username.length < 3 || username.length > 16) {
+      throw 'Username must be 3-16 characters.';
+    }
+    if (password.length < 4) {
+      throw 'Password must be at least 4 characters.';
+    }
+    final hash = _hashPassword(password);
+    try {
+      db.execute(
+        'INSERT INTO users(username, password_hash, created_at) VALUES (?,?,?)',
+        [username, hash, DateTime.now().toIso8601String()],
+      );
+    } catch (_) {
+      throw 'Username already taken.';
+    }
+    final row = db.select('SELECT id FROM users WHERE username = ?', [username]).first;
+    final userId = row['id'] as int;
+    db.execute('INSERT OR IGNORE INTO stats(user_id) VALUES (?)', [userId]);
+    db.execute('INSERT OR IGNORE INTO wallet(user_id) VALUES (?)', [userId]);
+    client.userId = userId;
+    client.name = username;
+    client.token = _generateToken();
+    client.send({
+      'type': 'auth',
+      'ok': true,
+      'mode': 'register',
+      'username': username,
+      'token': client.token,
+      'userId': userId,
+    });
+  }
+
+  void _login(Client client, Map<String, dynamic> message) {
+    final username = (message['username'] as String?)?.trim() ?? '';
+    final password = (message['password'] as String?) ?? '';
+    final rows = db.select(
+      'SELECT id, password_hash FROM users WHERE username = ?',
+      [username],
+    );
+    if (rows.isEmpty) throw 'Invalid credentials.';
+    final row = rows.first;
+    if (row['password_hash'] as String != _hashPassword(password)) {
+      throw 'Invalid credentials.';
+    }
+    final userId = row['id'] as int;
+    client.userId = userId;
+    client.name = username;
+    client.token = _generateToken();
+    client.send({
+      'type': 'auth',
+      'ok': true,
+      'mode': 'login',
+      'username': username,
+      'token': client.token,
+      'userId': userId,
+    });
+  }
+
+  void _leaderboard(Client client) {
+    final rows = db.select('''
+      SELECT u.username, s.wins, s.losses, s.total_score, s.games_played
+      FROM stats s JOIN users u ON u.id = s.user_id
+      ORDER BY s.total_score DESC, s.wins DESC
+      LIMIT 20
+    ''');
+    client.send({
+      'type': 'leaderboard',
+      'entries': rows.map((r) => {
+            'username': r['username'],
+            'wins': r['wins'],
+            'losses': r['losses'],
+            'totalScore': r['total_score'],
+            'gamesPlayed': r['games_played'],
+          }).toList(),
+    });
+  }
+
+  void _recordMatch(Room room) {
+    if (room.matchRecorded) return;
+    room.matchRecorded = true;
+    final winner = room.winningTeam;
+    if (winner == null) return;
+    db.execute(
+      'INSERT INTO matches(room_id, winner_team, scores, played_at) VALUES (?,?,?,?)',
+      [room.id, winner, jsonEncode(room.scores), DateTime.now().toIso8601String()],
+    );
+    for (var seat = 0; seat < 4; seat++) {
+      final client = room.seats[seat];
+      if (client == null || client.userId == null) continue;
+      final team = seat % 2;
+      final won = team == winner;
+      final points = room.scores[team];
+      db.execute('''
+        INSERT INTO stats(user_id, games_played, wins, losses, total_score)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          games_played = games_played + 1,
+          wins = wins + ?,
+          losses = losses + ?,
+          total_score = total_score + ?
+      ''', [
+        client.userId,
+        1,
+        won ? 1 : 0,
+        won ? 0 : 1,
+        points,
+        won ? 1 : 0,
+        won ? 0 : 1,
+        points,
+      ]);
+    }
+  }
+
+  void _wallet(Client client) {
+    if (client.userId == null) throw 'Login required.';
+    final rows = db.select(
+      'SELECT coins, gems FROM wallet WHERE user_id = ?',
+      [client.userId],
+    );
+    int coins = 0;
+    int gems = 0;
+    if (rows.isNotEmpty) {
+      coins = rows.first['coins'] as int;
+      gems = rows.first['gems'] as int;
+    } else {
+      db.execute('INSERT OR IGNORE INTO wallet(user_id) VALUES (?)', [client.userId]);
+    }
+    client.send({'type': 'wallet', 'coins': coins, 'gems': gems});
+  }
+
+  void _adReward(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    final type = (message['rewardType'] as String?) ?? 'coins';
+    db.execute('INSERT OR IGNORE INTO wallet(user_id) VALUES (?)', [client.userId]);
+    if (type == 'coins') {
+      db.execute('UPDATE wallet SET coins = coins + 50 WHERE user_id = ?', [client.userId]);
+    } else if (type == 'gems') {
+      db.execute('UPDATE wallet SET gems = gems + 5 WHERE user_id = ?', [client.userId]);
+    } else if (type == 'continue') {
+      db.execute('UPDATE wallet SET coins = coins + 10 WHERE user_id = ?', [client.userId]);
+    }
+    _wallet(client);
+  }
+
   void _play(Client client, Map<String, dynamic> message) {
     final room = client.room;
     if (room == null) throw 'You are not in a game.';
@@ -462,6 +740,7 @@ class Server {
   }
 
   void _publishRoom(Room room) {
+    if (room.status == 'gameover') _recordMatch(room);
     final type = room.status == 'gameover' ? 'gameover' : 'state';
     room.broadcast(type);
     _scheduleBotTurn(room);

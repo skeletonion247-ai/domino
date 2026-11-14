@@ -13,6 +13,8 @@ import '../widgets/opponent_seat.dart';
 import '../widgets/player_rack.dart';
 import '../widgets/score_header.dart';
 import '../widgets/sprite_domino_tile.dart';
+import '../services/ad_service.dart';
+import '../services/player_profile.dart';
 
 /// Joins the LAN matchmaker, then shows the authoritative server game.
 class MatchmakingScreen extends StatefulWidget {
@@ -24,6 +26,16 @@ class MatchmakingScreen extends StatefulWidget {
 
 class _MatchmakingScreenState extends State<MatchmakingScreen> {
   final _nameController = TextEditingController(text: 'Player');
+  final _serverController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+  int? _userId;
+  String? _authToken;
+  String? _authMessage;
+  List<Map<String, dynamic>> _leaderboardEntries = [];
+  int _coins = 0;
+  int _gems = 0;
+  bool _adWatchedForNext = false;
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Map<String, dynamic>? _state;
@@ -34,10 +46,26 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   String? _error;
   DominoTile? _selected;
   final GlobalKey _boardKey = GlobalKey();
+  bool _resultRecorded = false;
+
+  /// Credits the finished online match to the local profile once.
+  @override
+  void initState() {
+    super.initState();
+    _nameController.text = PlayerProfile.instance.name;
+    _usernameController.text = PlayerProfile.instance.name.toLowerCase();
+    final baseHost = Uri.base.host;
+    _serverController.text = baseHost.isEmpty
+        ? 'domino-server.taild9d968.ts.net'
+        : baseHost;
+  }
 
   @override
   void dispose() {
     _nameController.dispose();
+    _serverController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
     _subscription?.cancel();
     final channel = _channel;
     if (channel != null) {
@@ -57,19 +85,31 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
     if (_phase == 'connecting' || _phase == 'queue' || _phase == 'playing') {
       return;
     }
-    final host = Uri.base.host.isEmpty ? '127.0.0.1' : Uri.base.host;
-    final scheme = Uri.base.scheme == 'https' ? 'wss' : 'ws';
-    final channel = WebSocketChannel.connect(
-      Uri(scheme: scheme, host: host, port: 8080),
-    );
+    final rawHost = _serverController.text.trim().isEmpty
+        ? (Uri.base.host.isEmpty ? '127.0.0.1' : Uri.base.host)
+        : _serverController.text.trim();
+    final isLocal = rawHost == '127.0.0.1' ||
+        rawHost == 'localhost' ||
+        rawHost == '0.0.0.0';
+    final scheme = (Uri.base.scheme == 'https' || !isLocal) ? 'wss' : 'ws';
+    final port = isLocal ? 8080 : null;
+    // Reuse the authenticated connection when register/login already opened
+    // one, otherwise the server sees a fresh anonymous socket.
+    final channel = _channel ??
+        WebSocketChannel.connect(
+          Uri(scheme: scheme, host: rawHost, port: port),
+        );
+    final isNew = _channel == null;
     _channel = channel;
     setState(() {
       _phase = 'connecting';
       _error = null;
       _secondsRemaining = 20;
+      _adWatchedForNext = false;
     });
 
-    _subscription = channel.stream.listen(
+    if (isNew) {
+      _subscription = channel.stream.listen(
       _onServerMessage,
       onError: (Object error) => _connectionFailed(error),
       onDone: () {
@@ -78,6 +118,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
         }
       },
     );
+    }
 
     try {
       await channel.ready;
@@ -85,8 +126,9 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
         jsonEncode({
           'type': 'join',
           'name': _nameController.text.trim().isEmpty
-              ? 'Player'
+              ? PlayerProfile.instance.name
               : _nameController.text.trim(),
+          if (_authToken != null) 'token': _authToken,
         }),
       );
     } catch (error) {
@@ -112,6 +154,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
           setState(() {
             _phase = 'playing';
             _seat = (message['seat'] as num?)?.toInt() ?? _seat;
+            _resultRecorded = false;
           });
           break;
         case 'state':
@@ -121,6 +164,36 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
             _state = message;
             _seat = (message['you'] as num?)?.toInt() ?? _seat;
             _selected = null;
+          });
+          if (message['type'] == 'gameover') _recordOnlineResult(message);
+          break;
+        case 'auth':
+          if (message['ok'] == true) {
+            setState(() {
+              _userId = (message['userId'] as num?)?.toInt();
+              _authToken = message['token']?.toString();
+              _authMessage = 'Logged in as ${message['username']}';
+              if (_nameController.text.trim().isEmpty) {
+                _nameController.text = message['username']?.toString() ?? 'Player';
+              }
+              _send({'type': 'wallet'});
+            });
+          } else {
+            _connectionFailed(message['message']?.toString() ?? 'Auth failed.');
+          }
+          break;
+        case 'leaderboard':
+          setState(() {
+            _leaderboardEntries = (message['entries'] as List? ?? [])
+                .map((e) => Map<String, dynamic>.from(e as Map))
+                .toList();
+          });
+          _showLeaderboardDialog();
+          break;
+        case 'wallet':
+          setState(() {
+            _coins = (message['coins'] as num?)?.toInt() ?? _coins;
+            _gems = (message['gems'] as num?)?.toInt() ?? _gems;
           });
           break;
         case 'error':
@@ -132,12 +205,116 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
     }
   }
 
+  void _recordOnlineResult(Map<String, dynamic> message) {
+    if (_resultRecorded) return;
+    final scores = message['scores'] as List?;
+    if (scores == null || scores.length < 2) return;
+    _resultRecorded = true;
+    final s0 = (scores[0] as num).toInt();
+    final s1 = (scores[1] as num).toInt();
+    final winner = s0 >= 100 ? 0 : (s1 >= 100 ? 1 : -1);
+    if (winner < 0) return;
+    PlayerProfile.instance.recordMatch(
+      win: (_seat % 2) == winner,
+      scoreXp: (s0 + s1) ~/ 10,
+    );
+  }
+
   void _connectionFailed(Object error) {
     if (!mounted) return;
     setState(() {
       _phase = 'error';
       _error = '$error';
     });
+  }
+
+  Future<void> _ensureConnected() async {
+    if (_channel != null) return;
+    final rawHost = _serverController.text.trim().isEmpty
+        ? (Uri.base.host.isEmpty ? '127.0.0.1' : Uri.base.host)
+        : _serverController.text.trim();
+    final isLocal = rawHost == '127.0.0.1' ||
+        rawHost == 'localhost' ||
+        rawHost == '0.0.0.0';
+    final scheme = (Uri.base.scheme == 'https' || !isLocal) ? 'wss' : 'ws';
+    final port = isLocal ? 8080 : null;
+    final channel = WebSocketChannel.connect(
+      Uri(scheme: scheme, host: rawHost, port: port),
+    );
+    _channel = channel;
+    _subscription = channel.stream.listen(
+      _onServerMessage,
+      onError: (Object error) => _connectionFailed(error),
+      onDone: () {
+        if (mounted && _phase != 'playing') {
+          _connectionFailed('The game server disconnected.');
+        }
+      },
+    );
+    await channel.ready;
+  }
+
+  void _sendAuth(String type) {
+    final username = _usernameController.text.trim();
+    final password = _passwordController.text;
+    if (username.isEmpty || password.isEmpty) {
+      setState(() => _authMessage = 'Enter username and password.');
+      return;
+    }
+    _ensureConnected().then((_) {
+      _send({'type': type, 'username': username, 'password': password});
+    }).catchError((error) {
+      _connectionFailed(error);
+    });
+  }
+
+  void _showLeaderboardDialog() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Leaderboard'),
+        content: SizedBox(
+          width: 320,
+          height: 300,
+          child: ListView.builder(
+            itemCount: _leaderboardEntries.length,
+            itemBuilder: (context, index) {
+              final e = _leaderboardEntries[index];
+              return ListTile(
+                leading: Text('${index + 1}'),
+                title: Text(e['username']?.toString() ?? ''),
+                subtitle: Text(
+                  'W ${e['wins']}  L ${e['losses']}  Score ${e['totalScore']}',
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _watchAd(String rewardType) async {
+    final ok = await adService.showRewardedAd(rewardType: rewardType);
+    if (!ok) return;
+    _ensureConnected().then((_) {
+      _send({'type': 'ad_reward', 'rewardType': rewardType});
+    }).catchError((error) {
+      _connectionFailed(error);
+    });
+  }
+
+  Future<void> _watchAdToContinue() async {
+    await adService.showInterstitial();
+    _adWatchedForNext = true;
+    _send({'type': 'ad_reward', 'rewardType': 'continue'});
+    setState(() => _authMessage = 'Ad watched. You can join again.');
   }
 
   void _leave() {
@@ -350,6 +527,105 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                           ),
                         ),
                         const SizedBox(height: 8),
+                        TextField(
+                          controller: _serverController,
+                          decoration: InputDecoration(
+                            labelText: 'Game server host',
+                            hintText: 'domino-server.taild9d968.ts.net',
+                            filled: true,
+                            fillColor: Colors.white,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _usernameController,
+                          decoration: InputDecoration(
+                            labelText: 'Account username',
+                            filled: true,
+                            fillColor: Colors.white,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _passwordController,
+                          obscureText: true,
+                          decoration: InputDecoration(
+                            labelText: 'Account password',
+                            filled: true,
+                            fillColor: Colors.white,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                          ),
+                        ),
+                        if (_authMessage != null) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            _authMessage!,
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () => _sendAuth('register'),
+                                child: const Text('Register'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () => _sendAuth('login'),
+                                child: const Text('Login'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () {
+                                  _ensureConnected().then((_) {
+                                    _send({'type': 'leaderboard'});
+                                  }).catchError((error) {
+                                    _connectionFailed(error);
+                                  });
+                                },
+                                child: const Text('Leaderboard'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Coins: $_coins   Gems: $_gems',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () => _watchAd('coins'),
+                                child: const Text('Ad: +50 coins'),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () => _watchAd('gems'),
+                                child: const Text('Ad: +5 gems'),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
                         SizedBox(
                           width: double.infinity,
                           child: ArcadeButton(
@@ -537,9 +813,24 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
             if (gameOver)
               Padding(
                 padding: const EdgeInsets.all(12),
-                child: ElevatedButton(
-                  onPressed: _leave,
-                  child: const Text('BACK TO MENU'),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ElevatedButton(
+                      onPressed: _adWatchedForNext ? _leave : _watchAdToContinue,
+                      child: Text(
+                        _adWatchedForNext
+                            ? 'BACK TO MENU'
+                            : 'WATCH AD TO PLAY AGAIN',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (_adWatchedForNext)
+                      ElevatedButton(
+                        onPressed: _leave,
+                        child: const Text('BACK TO MENU'),
+                      ),
+                  ],
                 ),
               )
             else ...[

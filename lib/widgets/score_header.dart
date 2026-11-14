@@ -39,15 +39,15 @@ class ScoreHeader extends StatelessWidget {
         : (team1Score > team2Score ? 1 : 2);
 
     return SizedBox(
-      height: 107,
+      height: 96,
       child: Stack(
         children: [
           Positioned.fill(child: _backdrop()),
           Positioned(
             left: 10,
             right: 10,
-            top: 6,
-            height: 93,
+            top: 5,
+            height: 84,
             child: ArcadePanel(
               radius: 22,
               child: Stack(
@@ -81,30 +81,23 @@ class ScoreHeader extends StatelessWidget {
                     right: 0,
                     child: Center(child: _medallion(target)),
                   ),
-                  Positioned(right: 6, top: 6, child: _menuButton()),
+                  Positioned(right: 6, top: 5, child: _menuButton()),
                   Positioned(
                     left: 10,
                     right: 10,
-                    top: 54,
+                    top: 49,
                     height: 16,
                     child: _raceTrack(p1, p2),
                   ),
                   Positioned(
                     left: 12,
                     right: 12,
-                    top: 74,
+                    top: 67,
                     child: _toGoRow(target),
                   ),
                 ],
               ),
             ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: 4,
-            child: _turnStrip(),
           ),
         ],
       ),
@@ -409,23 +402,4 @@ class ScoreHeader extends StatelessWidget {
     );
   }
 
-  Widget _turnStrip() {
-    final f = turnFraction.clamp(0.0, 1.0);
-    return Container(
-      color: ArcadeColors.navy,
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: FractionallySizedBox(
-          widthFactor: f,
-          child: const DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [ArcadeColors.gold, ArcadeColors.goldDeep],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
