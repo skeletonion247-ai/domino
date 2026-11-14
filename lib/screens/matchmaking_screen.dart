@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -30,7 +31,8 @@ class MatchmakingScreen extends StatefulWidget {
   State<MatchmakingScreen> createState() => _MatchmakingScreenState();
 }
 
-class _MatchmakingScreenState extends State<MatchmakingScreen> {
+class _MatchmakingScreenState extends State<MatchmakingScreen>
+    with SingleTickerProviderStateMixin {
   final _nameController = TextEditingController(text: 'Player');
   final _serverController = TextEditingController();
   final _usernameController = TextEditingController();
@@ -57,6 +59,10 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   bool _resultDialogShown = false;
   String? _lastPlacedId;
   List<DominoTile>? _localHand;
+  Rect? _selectedFromRect;
+  bool _animating = false;
+  late final AnimationController _flyController;
+  OverlayEntry? _flyEntry;
   final ValueNotifier<double> _turnProgress = ValueNotifier<double>(1);
   Timer? _turnTicker;
   Timer? _passTimer;
@@ -66,6 +72,10 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   @override
   void initState() {
     super.initState();
+    _flyController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    );
     _nameController.text = PlayerProfile.instance.name;
     _usernameController.text = PlayerProfile.instance.name.toLowerCase();
     final baseHost = Uri.base.host;
@@ -83,6 +93,9 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   void dispose() {
     _turnTicker?.cancel();
     _passTimer?.cancel();
+    _flyEntry?.remove();
+    _flyEntry = null;
+    _flyController.dispose();
     _turnProgress.dispose();
     _nameController.dispose();
     _serverController.dispose();
@@ -181,7 +194,11 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
             _localHand = null;
             _timerTurn = -1;
             _lastPlacedId = null;
+            _selectedFromRect = null;
+            _animating = false;
           });
+          _flyEntry?.remove();
+          _flyEntry = null;
           _turnProgress.value = 1;
           break;
         case 'state':
@@ -201,6 +218,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
             _state = message;
             _seat = (message['you'] as num?)?.toInt() ?? _seat;
             _selected = null;
+            _selectedFromRect = null;
             if (newlyPlaced != null) _lastPlacedId = newlyPlaced;
           });
           _syncHandOrder();
@@ -263,6 +281,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   }
 
   void _sortHand() {
+    if (_animating) return;
     setState(() {
       final hand = [...(_localHand ?? _hand)];
       hand.sort((a, b) {
@@ -275,6 +294,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   }
 
   void _reorderHand(int oldIndex, int newIndex) {
+    if (_animating) return;
     setState(() {
       final hand = [...(_localHand ?? _hand)];
       if (oldIndex < 0 || oldIndex >= hand.length) return;
@@ -303,7 +323,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
       if (value > 0) return;
       timer.cancel();
       // Time is up on your turn: auto-play a legal tile, otherwise pass.
-      if (!mounted || !_myTurn) return;
+      if (!mounted || _animating || !_myTurn) return;
       final playable = _playable;
       if (playable.isEmpty) {
         _send({'type': 'pass'});
@@ -522,21 +542,32 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
   }
 
   void _onTileTap(DominoTile tile, Rect? fromRect) {
-    if (!_myTurn || !_playable.contains(tile)) return;
+    if (!_myTurn || _animating || !_playable.contains(tile)) return;
     if (_board.isEmpty) {
-      _play(tile, 'right');
+      _play(tile, 'right', fromRect: fromRect);
       return;
     }
-    setState(() => _selected = _selected == tile ? null : tile);
+    setState(() {
+      _selected = _selected == tile ? null : tile;
+      _selectedFromRect = _selected == null ? null : fromRect;
+    });
   }
 
   bool _fitsEnd(DominoTile tile, String side) =>
       tile.matches(side == 'left' ? _left : _right);
 
-  Rect? _targetRect(DominoTile tile, String side) {
-    final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+  /// Where [tile] lands after playing it on [side]. Board-local by default,
+  /// global (screen) coordinates when [local] is false.
+  ({Rect rect, bool horizontal, bool flipped})? _placementFor(
+    DominoTile tile,
+    String side, {
+    required bool local,
+  }) {
+    final ctx = _boardKey.currentContext;
+    final box = ctx?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return null;
     final size = box.size;
+    final origin = local ? Offset.zero : box.localToGlobal(Offset.zero);
     final connected = side == 'left' ? _left : _right;
     final layout = computeLayout(
       [..._board, PlacedTile(tile, side, connected)],
@@ -558,12 +589,91 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
         placement.offset.dy -
         bounds.top -
         h / 2;
-    return Rect.fromLTWH(left, top, w, h);
+    return (
+      rect: Rect.fromLTWH(origin.dx + left, origin.dy + top, w, h),
+      horizontal: placement.horizontal,
+      flipped: placement.isFlipped,
+    );
+  }
+
+  Rect? _targetRect(DominoTile tile, String side) =>
+      _placementFor(tile, side, local: true)?.rect;
+
+  void _flyTile(
+    DominoTile tile,
+    Rect from,
+    ({Rect rect, bool horizontal, bool flipped}) target,
+    VoidCallback onDone,
+  ) {
+    final overlay = Overlay.of(context);
+    final horizontal = target.horizontal;
+    final flipped = target.flipped;
+    final to = target.rect;
+    final fromScale = (from.height / 130).clamp(0.2, 1.0).toDouble();
+    final toScale = (to.height / (horizontal ? 60 : 130))
+        .clamp(0.2, 1.0)
+        .toDouble();
+    final targetTurns = (horizontal ? 1 : 0) + (flipped ? 2 : 0);
+    var targetAngle = targetTurns * math.pi / 2;
+    if (targetAngle > math.pi) targetAngle -= math.pi * 2;
+    var angleDelta = targetAngle;
+    if (angleDelta > math.pi) angleDelta -= math.pi * 2;
+    if (angleDelta < -math.pi) angleDelta += math.pi * 2;
+
+    final hi = math.max(tile.top, tile.bottom);
+    final lo = math.min(tile.top, tile.bottom);
+    final face = 'assets/tiles/t1d$hi$lo.png';
+
+    _flyEntry?.remove();
+    _flyEntry = OverlayEntry(
+      builder: (_) => IgnorePointer(
+        child: AnimatedBuilder(
+          animation: _flyController,
+          builder: (context, _) {
+            final t = Curves.easeInOutCubic.transform(_flyController.value);
+            final center =
+                Offset.lerp(from.center, to.center, t)! +
+                Offset(0, -42 * math.sin(math.pi * t));
+            final scale = fromScale + (toScale - fromScale) * t;
+            final angle = angleDelta * t;
+            final imageWidth = 60 * scale;
+            final imageHeight = 130 * scale;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                Positioned(
+                  left: center.dx - imageWidth / 2,
+                  top: center.dy - imageHeight / 2,
+                  width: imageWidth,
+                  height: imageHeight,
+                  child: Transform.rotate(
+                    angle: angle,
+                    child: Image.asset(
+                      face,
+                      width: imageWidth,
+                      height: imageHeight,
+                      fit: BoxFit.fill,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+    overlay.insert(_flyEntry!);
+    _flyController.forward(from: 0).whenCompleteOrCancel(() {
+      _flyEntry?.remove();
+      _flyEntry = null;
+      if (!mounted) return;
+      onDone();
+    });
   }
 
   List<Widget> _endTargets() {
     final tile = _selected;
-    if (tile == null || !_myTurn) return const [];
+    if (tile == null || _animating || !_myTurn) return const [];
     return [
       for (final side in const ['left', 'right'])
         if (_fitsEnd(tile, side))
@@ -571,7 +681,11 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
             Positioned.fromRect(
               rect: rect.inflate(6),
               child: GestureDetector(
-                onTap: () => _play(tile, side),
+                onTap: () => _play(
+                  tile,
+                  side,
+                  fromRect: _selectedFromRect,
+                ),
                 child: Container(
                   decoration: BoxDecoration(
                     color: const Color(0xFFFFD700).withValues(alpha: 0.45),
@@ -598,7 +712,30 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
     ];
   }
 
-  void _play(DominoTile tile, String side) {
+  void _play(DominoTile tile, String side, {Rect? fromRect}) {
+    if (_animating) return;
+    final target = fromRect == null
+        ? null
+        : _placementFor(tile, side, local: false);
+    if (fromRect == null || target == null) {
+      _sendPlay(tile, side);
+      return;
+    }
+    setState(() {
+      _selected = null;
+      _selectedFromRect = null;
+      _animating = true;
+      // Hide it from the hand while it is in the air.
+      _localHand = [...(_localHand ?? _hand)]..remove(tile);
+    });
+    _flyTile(tile, fromRect, target, () {
+      if (!mounted) return;
+      setState(() => _animating = false);
+      _sendPlay(tile, side);
+    });
+  }
+
+  void _sendPlay(DominoTile tile, String side) {
     _send({
       'type': 'play',
       'tile': [tile.top, tile.bottom],
@@ -882,7 +1019,9 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                   Positioned.fill(
                     child: DragTarget<DominoTile>(
                       onWillAcceptWithDetails: (details) =>
-                          _myTurn && _playable.contains(details.data),
+                          !_animating &&
+                          _myTurn &&
+                          _playable.contains(details.data),
                       onAcceptWithDetails: (details) {
                         final tile = details.data;
                         final fitsLeft = _left >= 0 && tile.matches(_left);
@@ -893,7 +1032,15 @@ class _MatchmakingScreenState extends State<MatchmakingScreen> {
                                 ? 'left'
                                 : 'right')
                             : (fitsLeft ? 'left' : 'right');
-                        _play(tile, side);
+                        _play(
+                          tile,
+                          side,
+                          fromRect: Rect.fromCenter(
+                            center: details.offset,
+                            width: 40,
+                            height: 88,
+                          ),
+                        );
                       },
                       builder: (context, candidate, rejected) =>
                           const SizedBox.expand(),
