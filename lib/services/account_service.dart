@@ -48,7 +48,12 @@ class AccountService extends ChangeNotifier {
   List<Map<String, dynamic>> missions = [];
   List<Map<String, dynamic>> friends = [];
 
+  /// When false, [connect] does nothing. Widget tests switch this off so the
+  /// suite never opens a real socket (which leaves a pending connect timer).
+  bool autoConnect = true;
+
   Future<void> connect() async {
+    if (!autoConnect) return;
     if (_channel != null) return;
     try {
       final ch = WebSocketChannel.connect(_uri);
