@@ -7,8 +7,10 @@ import '../game/domino_set.dart';
 import '../models/domino_tile.dart';
 import '../models/game_state.dart';
 import '../models/player.dart';
+import '../services/audio_service.dart';
 import '../widgets/game_board.dart';
 import '../widgets/hand_over_dialog.dart';
+import '../widgets/hand_reveal.dart';
 import '../widgets/opponent_seat.dart';
 import '../widgets/player_rack.dart';
 import '../widgets/score_header.dart';
@@ -26,15 +28,18 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   static const int _targetScore = 100;
   static const double _turnSeconds = 20;
 
   final GlobalKey _boardKey = GlobalKey();
   final GlobalKey _rackKey = GlobalKey();
+  final GlobalKey _tableKey = GlobalKey();
   late final AnimationController _flyController;
   final ValueNotifier<double> _turnProgress = ValueNotifier<double>(1);
   OverlayEntry? _flyEntry;
+  HandRevealRun? _revealRun;
+  bool _revealing = false;
   bool _animating = false;
   final List<GlobalKey> _seatKeys = List.generate(4, (_) => GlobalKey());
   DominoTile? _selected;
@@ -59,6 +64,12 @@ class _GameScreenState extends State<GameScreen>
     const DominoTile(5, 5),
     const DominoTile(2, 3),
   ];
+
+  /// Vertical run length for each line of the practice snake. Both start at
+  /// the classic 3 and may each grow to 4 once, if that line has free space.
+  /// They never change back mid-hand.
+  double _topRun = 3;
+  double _bottomRun = 3;
 
   final List<PlacedTile> _board = [
     PlacedTile(const DominoTile(6, 6), 'center', 6),
@@ -142,6 +153,8 @@ class _GameScreenState extends State<GameScreen>
     _turnProgress.dispose();
     _flyEntry?.remove();
     _flyEntry = null;
+    _revealRun?.dispose();
+    _revealRun = null;
     _flyController.dispose();
     super.dispose();
   }
@@ -239,6 +252,8 @@ class _GameScreenState extends State<GameScreen>
       }
     }
 
+    _topRun = 3;
+    _bottomRun = 3;
     _turnStart = DateTime.now();
     _turnIndex = -1;
     _turnProgress.value = 1;
@@ -249,6 +264,65 @@ class _GameScreenState extends State<GameScreen>
     _dealHand();
     setState(() {});
     _scheduleBots();
+  }
+
+  /// After the snake has grown, let each line take one extra vertical tile
+  /// when that line still has free space above/below. "Free space" means the
+  /// extra tile fits without shrinking the tiles or overlapping anything.
+  /// Top and bottom are decided independently and each switch is one-way, so
+  /// the snake cannot keep reshaping move after move.
+  void _maybeGrowVerticalRuns() {
+    if (_topRun == 4 && _bottomRun == 4) return;
+    final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final size = box.size;
+    if (size.width >= size.height) return; // portrait / tall screens only
+
+    // Never grow a vertical run before its own horizontal row is already
+    // laid. Until then the classic 3-tile runs stay untouched, so the snake
+    // cannot run 4 (or 4.5 with a double) down a line that has not turned
+    // horizontally yet.
+    final full = fullHorizontalRows(
+      _board,
+      maxWidth: size.width,
+      maxHeight: size.height,
+    );
+    if ((_topRun == 4 || !full.top) && (_bottomRun == 4 || !full.bottom)) {
+      return;
+    }
+
+    SnakeLayout at(double top, double bottom) => computeLayout(
+          _board,
+          maxWidth: size.width,
+          maxHeight: size.height,
+          smart: true,
+          topRun: top,
+          bottomRun: bottom,
+        );
+
+    var top = _topRun;
+    var bottom = _bottomRun;
+    var current = at(top, bottom);
+
+    if (top == 3 && full.top) {
+      final next = at(4, bottom);
+      if (!next.fellBack && next.scale >= current.scale - 0.001) {
+        top = 4;
+        current = next;
+      }
+    }
+    if (bottom == 3 && full.bottom) {
+      final next = at(top, 4);
+      if (!next.fellBack && next.scale >= current.scale - 0.001) {
+        bottom = 4;
+      }
+    }
+    if (top != _topRun || bottom != _bottomRun) {
+      setState(() {
+        _topRun = top;
+        _bottomRun = bottom;
+      });
+    }
   }
 
   (int, int) _openEnds() {
@@ -286,6 +360,7 @@ class _GameScreenState extends State<GameScreen>
     final ends = _endsFor(tile);
     if (!ends.left && !ends.right) return;
     // Select the tile; the player then taps the end where it should go.
+    AudioService.instance.playClick();
     setState(() {
       _selected = tile;
       _selectedFromRect = fromRect;
@@ -297,6 +372,7 @@ class _GameScreenState extends State<GameScreen>
     if (tile == null) return;
     final from = _selectedFromRect;
     setState(() => _selected = null);
+    AudioService.instance.playClick();
     _startPlay(tile, side, from);
   }
 
@@ -339,6 +415,7 @@ class _GameScreenState extends State<GameScreen>
       _selected = null;
       _dragTile = null;
     });
+    _maybeGrowVerticalRuns();
     if (_hand.isEmpty) {
       _endHand(0);
       return;
@@ -366,6 +443,9 @@ class _GameScreenState extends State<GameScreen>
       sim,
       maxWidth: size.width,
       maxHeight: size.height,
+      smart: true,
+      topRun: _topRun,
+      bottomRun: _bottomRun,
     );
     final bounds = layout.bounds;
     final scale = layout.scale;
@@ -522,11 +602,17 @@ class _GameScreenState extends State<GameScreen>
       _board,
       maxWidth: size.width,
       maxHeight: size.height,
+      smart: true,
+      topRun: _topRun,
+      bottomRun: _bottomRun,
     );
     final next = computeLayout(
       sim,
       maxWidth: size.width,
       maxHeight: size.height,
+      smart: true,
+      topRun: _topRun,
+      bottomRun: _bottomRun,
     );
 
     final endTile = side == 'left' ? _leftEndTile : _rightEndTile;
@@ -773,6 +859,7 @@ class _GameScreenState extends State<GameScreen>
         _dragTile = null;
         _consecutivePasses = 0;
       });
+      _maybeGrowVerticalRuns();
       if (player.hand.isEmpty) {
         _endHand(player.team);
         return;
@@ -825,8 +912,8 @@ class _GameScreenState extends State<GameScreen>
     _finishHand(winningTeam, points);
   }
 
-  /// Adds the hand points, then either ends the match (win card) or deals the
-  /// next hand automatically after a short pause.
+  /// Adds the hand points, runs the tile reveal, then either ends the match
+  /// (win card) or deals the next hand.
   void _finishHand(int winningTeam, int points) {
     _botTimer?.cancel();
     setState(() {
@@ -839,21 +926,65 @@ class _GameScreenState extends State<GameScreen>
     });
 
     final gameOver = _team1Score >= _targetScore || _team2Score >= _targetScore;
-    if (gameOver) {
-      if (widget.autoPlay) {
-        _botTimer = Timer(const Duration(milliseconds: 1100), () {
-          if (!mounted) return;
-          _dealGame();
-          setState(() {});
-          _scheduleBots();
-        });
+    _playReveal(() {
+      if (!mounted) return;
+      if (gameOver) {
+        if (widget.autoPlay) {
+          _botTimer = Timer(const Duration(milliseconds: 700), () {
+            if (!mounted) return;
+            _dealGame();
+            setState(() {});
+            _scheduleBots();
+          });
+          return;
+        }
+        _showHandOver(winningTeam, points);
         return;
       }
-      _showHandOver(winningTeam, points);
+      _startNextHand();
+    });
+  }
+
+  /// Foundation for the end-of-hand reveal.
+  Rect? _rectOf(GlobalKey key) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  /// End-of-hand reveal: every player's leftover tiles appear face-up on their
+  /// own side of the table, gather and shake in the middle, then fly back.
+  void _playReveal(VoidCallback onDone) {
+    final table = _rectOf(_tableKey);
+    if (table == null) {
+      onDone();
       return;
     }
-    _botTimer = Timer(const Duration(milliseconds: 1500), () {
-      if (mounted) _startNextHand();
+    final hands = [
+      List<DominoTile>.of(_hand),
+      List<DominoTile>.of(_players[1].hand),
+      List<DominoTile>.of(_players[2].hand),
+      List<DominoTile>.of(_players[3].hand),
+    ];
+    setState(() => _revealing = true);
+    _revealRun?.dispose();
+    _revealRun = HandReveal.play(
+      context: context,
+      vsync: this,
+      table: table,
+      rack: _rectOf(_rackKey),
+      hands: hands,
+    );
+    if (_revealRun == null) {
+      setState(() => _revealing = false);
+      onDone();
+      return;
+    }
+    _revealRun!.done.whenComplete(() {
+      _revealRun = null;
+      if (!mounted) return;
+      setState(() => _revealing = false);
+      onDone();
     });
   }
 
@@ -921,6 +1052,7 @@ class _GameScreenState extends State<GameScreen>
             Expanded(
               child: ClipRect(
                 child: Stack(
+                  key: _tableKey,
                   children: [
                     const Positioned.fill(child: _Felt()),
                     // Drop anywhere on the table: if only one end fits, play there.
@@ -958,6 +1090,7 @@ class _GameScreenState extends State<GameScreen>
                           playerIndex: 2,
                           isCurrentTurn: _current == 2,
                           turnProgress: _current == 2 ? progress : 1,
+                          hideTiles: _revealing,
                         ),
                       ),
                     ),
@@ -976,6 +1109,7 @@ class _GameScreenState extends State<GameScreen>
                             isCurrentTurn: _current == 1,
                             turnProgress: _current == 1 ? progress : 1,
                             direction: Axis.vertical,
+                            hideTiles: _revealing,
                           ),
                         ),
                       ),
@@ -995,6 +1129,7 @@ class _GameScreenState extends State<GameScreen>
                             isCurrentTurn: _current == 3,
                             turnProgress: _current == 3 ? progress : 1,
                             direction: Axis.vertical,
+                            hideTiles: _revealing,
                           ),
                         ),
                       ),
@@ -1009,6 +1144,9 @@ class _GameScreenState extends State<GameScreen>
                             GameBoard(
                               key: _boardKey,
                               board: _board,
+                              smart: true,
+                              topRun: _topRun,
+                              bottomRun: _bottomRun,
                               tileBuilder:
                                   (
                                     tile, {
@@ -1029,13 +1167,6 @@ class _GameScreenState extends State<GameScreen>
                         ),
                       ),
                     ),
-                    // Whose turn it is.
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 6,
-                      child: Center(child: _turnPill(_current == 0)),
-                    ),
                   ],
                 ),
               ),
@@ -1048,6 +1179,7 @@ class _GameScreenState extends State<GameScreen>
                 playable: _playable,
                 isMyTurn: _current == 0,
                 turnFraction: progress,
+                hideTiles: _revealing,
                 onTileTap: _playHuman,
                 onSort: () {},
                 onReorder: _reorderHand,
@@ -1059,39 +1191,6 @@ class _GameScreenState extends State<GameScreen>
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _turnPill(bool isHumanTurn) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isHumanTurn ? const Color(0xFFFFD700) : Colors.white24,
-          width: 1.2,
-        ),
-      ),
-      child: Text(
-        _handOver
-            ? (_team1Score >= _targetScore || _team2Score >= _targetScore
-                  ? 'MATCH COMPLETE • NEXT GAME...'
-                  : 'HAND COMPLETE • NEXT HAND...')
-            : widget.autoPlay
-            ? '${_players[_current].name.toUpperCase()} • AUTO PLAY'
-            : isHumanTurn
-            ? 'YOUR TURN'
-            : 'Bot is thinking...',
-        style: TextStyle(
-          color: isHumanTurn || _handOver
-              ? const Color(0xFFFFD700)
-              : Colors.white70,
-          fontSize: 11,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0.6,
         ),
       ),
     );

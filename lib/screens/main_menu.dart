@@ -1,9 +1,13 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
 import '../models/domino_tile.dart';
+import '../services/ad_service.dart';
+import '../services/account_service.dart';
+import '../services/ad_service.dart';
 import '../services/player_profile.dart';
 import '../widgets/sprite_domino_tile.dart';
 import 'game_screen.dart';
@@ -48,6 +52,8 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    AccountService.instance.addListener(_onAccountChanged);
+    unawaited(AccountService.instance.connect());
     _entrance = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1100),
@@ -63,11 +69,102 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   }
 
   @override
+  void _onAccountChanged() {
+    final a = AccountService.instance;
+    if (a.username != null) {
+      PlayerProfile.instance.setName(a.username!);
+      PlayerProfile.instance.setCoins(a.coins);
+      PlayerProfile.instance.setGems(a.gems);
+    }
+  }
+
+  @override
   void dispose() {
+    AccountService.instance.removeListener(_onAccountChanged);
     _entrance.dispose();
     _float.dispose();
     _shine.dispose();
     super.dispose();
+  }
+
+  Future<void> _showAccountDialog() async {
+    final userCtrl = TextEditingController(text: AccountService.instance.username ?? '');
+    final passCtrl = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Account'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListenableBuilder(
+              listenable: AccountService.instance,
+              builder: (_, __) {
+                final a = AccountService.instance;
+                return Text(a.username == null
+                    ? 'Not logged in'
+                    : 'Logged in as ${a.username}  •  ${a.coins} coins  ${a.gems} gems');
+              },
+            ),
+            const SizedBox(height: 8),
+            TextField(controller: userCtrl, decoration: const InputDecoration(labelText: 'Username')),
+            TextField(controller: passCtrl, decoration: const InputDecoration(labelText: 'Password'), obscureText: true),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      AccountService.instance.login(userCtrl.text.trim(), passCtrl.text);
+                    },
+                    child: const Text('Login'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      AccountService.instance.register(userCtrl.text.trim(), passCtrl.text);
+                    },
+                    child: const Text('Register'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => AccountService.instance.claimAdReward('coins'),
+                    child: const Text('Ad +50 coins'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => AccountService.instance.claimAdReward('gems'),
+                    child: const Text('Ad +5 gems'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              AccountService.instance.logout();
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Logout'),
+          ),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close')),
+        ],
+      ),
+    );
+    userCtrl.dispose();
+    passCtrl.dispose();
   }
 
   void _openPage(Widget page) {
@@ -185,22 +282,26 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
           SizedBox(
             width: 92,
             child: _PressButton(
-              onTap: () {
+              onTap: () async {
                 Navigator.of(context).pop();
+                final ok = await adService.showRewardedAd(
+                  rewardType: label == 'COINS' ? 'coins' : 'gems',
+                );
+                if (!ok) return;
                 PlayerProfile.instance.addCoins(coins);
                 PlayerProfile.instance.addGems(gems);
-                _showMessage('$label pack purchased');
+                _showMessage('$label reward earned');
               },
               height: 38,
               depth: 5,
               radius: 12,
               faceColors: const [_C.green, _C.greenDeep],
               edgeColor: _C.greenEdge,
-              child: Text(
-                '\$${price.toStringAsFixed(2)}',
-                style: const TextStyle(
+              child: const Text(
+                'WATCH AD',
+                style: TextStyle(
                   color: Colors.white,
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -505,7 +606,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
               ),
             ),
             const SizedBox(width: 8),
-            _extrudedTitle('DOMINO'),
+            _extrudedTitle('DOMINOES'),
             const SizedBox(width: 8),
             Transform(
               alignment: Alignment.center,
@@ -533,7 +634,7 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
             ],
           ),
           child: const Text(
-            'BATTLE ARENA',
+            'DZ · BATTLE ARENA',
             style: TextStyle(
               color: Colors.white,
               fontSize: 11,

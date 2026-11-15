@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../services/account_service.dart';
+import '../services/audio_service.dart';
 import '../services/player_profile.dart';
 import '../widgets/menu_ui.dart';
 
@@ -144,106 +146,95 @@ class _RowTile extends StatelessWidget {
 // Ranks
 // ---------------------------------------------------------------------------
 
-class RanksPage extends StatelessWidget {
+class RanksPage extends StatefulWidget {
   const RanksPage({super.key});
 
-  static List<List<Object>> _rows(PlayerProfile p) => [
-        [1, 'NOVA', 'MASTER', 4820],
-        [2, 'RAVEN', 'MASTER', 4610],
-        [3, 'KAI', 'DIAMOND', 4390],
-        [4, 'LUNA', 'DIAMOND', 4180],
-        [5, 'ORION', 'DIAMOND', 4055],
-        [6, 'MILA', 'PLATINUM', 3870],
-        [7, 'ZEUS', 'PLATINUM', 3760],
-        [8, 'IRIS', 'PLATINUM', 3620],
-        [9, 'FELIX', 'GOLD', 3480],
-        [10, 'SAGE', 'GOLD', 3355],
-        [11, 'REX', 'GOLD', 3120],
-        [12, p.name, 'GOLD', 1500 + p.wins * 120 - p.losses * 30],
-      ];
+  @override
+  State<RanksPage> createState() => _RanksPageState();
+}
+
+class _RanksPageState extends State<RanksPage> {
+  @override
+  void initState() {
+    super.initState();
+    AccountService.instance.connect().then((_) {
+      AccountService.instance.requestLeaderboard();
+    });
+    AccountService.instance.addListener(_onUpdate);
+  }
+
+  void _onUpdate() => setState(() {});
+
+  @override
+  void dispose() {
+    AccountService.instance.removeListener(_onUpdate);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: PlayerProfile.instance,
-      builder: (context, _) {
-        final me = PlayerProfile.instance.name;
-        final rows = _rows(PlayerProfile.instance);
-        return MenuScaffold(
+    final entries = AccountService.instance.leaderboard;
+    return MenuScaffold(
       title: 'RANKS',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const _PageHeader(
             title: 'SEASON 1 LEADERBOARD',
-            subtitle: 'Resets in 6 days · Top 3 promote',
+            subtitle: 'Live server rankings',
           ),
           const SizedBox(height: 14),
           const MenuSectionLabel('LEADERBOARD'),
           MenuPanel(
             padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-            child: Column(
-              children: [
-                for (final p in rows)
-                  Builder(
-                    builder: (context) {
-                      final rank = p[0] as int;
-                      final name = p[1] as String;
-                      final tier = p[2] as String;
-                      final points = p[3] as int;
-                      final isMe = name == me;
-                      final medal = rank == 1
-                          ? MenuColors.gold
-                          : rank == 2
-                              ? const Color(0xFFC9D3DD)
-                              : rank == 3
-                                  ? const Color(0xFFD28B52)
-                                  : MenuColors.frostEdge;
-                      return _RowTile(
-                        highlight: isMe ? MenuColors.goldDeep : null,
-                        leading: SizedBox(
-                          width: 30,
-                          child: Text(
-                            '#$rank',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: rank <= 3 ? medal : MenuColors.navy,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ),
-                        title: name,
-                        subtitle: tier,
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              '$points',
+            child: entries.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text('Loading...', style: TextStyle(color: MenuColors.navy)),
+                  )
+                : Column(
+                    children: [
+                      for (var i = 0; i < entries.length; i++)
+                        _RowTile(
+                          leading: SizedBox(
+                            width: 30,
+                            child: Text(
+                              '#${i + 1}',
+                              textAlign: TextAlign.center,
                               style: const TextStyle(
                                 color: MenuColors.navy,
                                 fontSize: 13,
                                 fontWeight: FontWeight.w900,
                               ),
                             ),
-                            const SizedBox(width: 4),
-                            const Icon(
-                              Icons.star_rounded,
-                              color: MenuColors.goldDeep,
-                              size: 15,
-                            ),
-                          ],
+                          ),
+                          title: entries[i]['username']?.toString() ?? '',
+                          subtitle: 'W ${entries[i]['wins']}  L ${entries[i]['losses']}',
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '${entries[i]['totalScore']}',
+                                style: const TextStyle(
+                                  color: MenuColors.navy,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              const Icon(
+                                Icons.star_rounded,
+                                color: MenuColors.goldDeep,
+                                size: 15,
+                              ),
+                            ],
+                          ),
                         ),
-                      );
-                    },
+                    ],
                   ),
-              ],
-            ),
           ),
         ],
       ),
-    );
-      },
     );
   }
 }
@@ -260,20 +251,46 @@ class MissionsPage extends StatefulWidget {
 }
 
 class _MissionsPageState extends State<MissionsPage> {
-  final _missions = <_Mission>[
-    _Mission('Play 3 matches', 'Block, draw or fives', 3, 3, '250'),
-    _Mission('Win 2 matches in a row', 'Any mode', 1, 2, '400'),
-    _Mission('Play 5 doubles', 'Place a double in any match', 5, 5, '200'),
-    _Mission('Score 100 points', 'Team score across matches', 72, 100, '350'),
-    _Mission('Finish a hand without passing', 'No passes in one hand', 1, 1, '300'),
-    _Mission('Invite a friend', 'Share your code once', 0, 1, '500'),
-  ];
+  final _missions = <_Mission>[];
+
+  @override
+  void initState() {
+    super.initState();
+    AccountService.instance.connect().then((_) {
+      AccountService.instance.addListener(_onAccount);
+      AccountService.instance.requestMissions();
+    });
+  }
+
+  void _onAccount() {
+    final ms = AccountService.instance.missions;
+    if (ms.isEmpty) return;
+    setState(() {
+      _missions
+        ..clear()
+        ..addAll(ms.map((m) => _Mission(
+              m['key']?.toString() ?? '',
+              m['title']?.toString() ?? '',
+              m['subtitle']?.toString() ?? '',
+              (m['progress'] as num?)?.toInt() ?? 0,
+              (m['target'] as num?)?.toInt() ?? 1,
+              (m['reward'] as num?)?.toString() ?? '0',
+              claimed: m['claimed'] == true,
+            )));
+    });
+  }
+
+  @override
+  void dispose() {
+    AccountService.instance.removeListener(_onAccount);
+    super.dispose();
+  }
 
   void _claim(int index) {
     final m = _missions[index];
     if (!m.complete || m.claimed) return;
+    AccountService.instance.claimMission(_missions[index].key);
     setState(() => m.claimed = true);
-    PlayerProfile.instance.addCoins(int.tryParse(m.reward) ?? 0);
     _toast(context, 'Claimed ${m.reward} coins');
   }
 
@@ -462,6 +479,7 @@ class _MissionsPageState extends State<MissionsPage> {
 }
 
 class _Mission {
+  final String key;
   final String title;
   final String subtitle;
   final int target;
@@ -470,12 +488,14 @@ class _Mission {
   bool claimed = false;
 
   _Mission(
+    this.key,
     this.title,
     this.subtitle,
     this.progress,
     this.target,
-    this.reward,
-  );
+    this.reward, {
+    this.claimed = false,
+  });
 
   bool get complete => progress >= target;
 }
@@ -492,22 +512,52 @@ class FriendsPage extends StatefulWidget {
 }
 
 class _FriendsPageState extends State<FriendsPage> {
-  final _friends = <_Friend>[
-    _Friend('NOVA', 'Online · Gold III', _FriendState.online),
-    _Friend('RAVEN', 'In a match', _FriendState.playing),
-    _Friend('KAI', 'Online · Platinum I', _FriendState.online),
-    _Friend('LUNA', 'Offline · 2h ago', _FriendState.offline),
-    _Friend('ORION', 'Online · Silver II', _FriendState.online),
-    _Friend('MILA', 'Offline · yesterday', _FriendState.offline),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    AccountService.instance.connect().then((_) {
+      AccountService.instance.requestFriends();
+    });
+    AccountService.instance.addListener(_onUpdate);
+  }
 
-  void _invite(_Friend f) {
-    _toast(context, 'Invite sent to ${f.name}');
+  void _onUpdate() => setState(() {});
+
+  @override
+  void dispose() {
+    AccountService.instance.removeListener(_onUpdate);
+    super.dispose();
+  }
+
+  void _invite(String name) {
+    _toast(context, 'Invite sent to $name');
+  }
+
+  void _addFriendDialog() {
+    final ctrl = TextEditingController();
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add friend'),
+        content: TextField(controller: ctrl, decoration: const InputDecoration(labelText: 'Username')),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () {
+              AccountService.instance.addFriend(ctrl.text.trim());
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final online = _friends.where((f) => f.state != _FriendState.offline).length;
+    final friends = AccountService.instance.friends;
+    final online = friends.length;
     return MenuScaffold(
       title: 'FRIENDS',
       child: Column(
@@ -545,7 +595,7 @@ class _FriendsPageState extends State<FriendsPage> {
               const SizedBox(width: 10),
               Expanded(
                 child: MenuPressButton(
-                  onTap: () => _toast(context, 'Friend search is coming soon'),
+                  onTap: _addFriendDialog,
                   height: 46,
                   depth: 5,
                   radius: 14,
@@ -569,7 +619,7 @@ class _FriendsPageState extends State<FriendsPage> {
           MenuPanel(
             padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
             child: Column(
-              children: [for (final f in _friends) _friendRow(f)],
+              children: [for (final f in friends) _friendRow(f)],
             ),
           ),
         ],
@@ -577,41 +627,40 @@ class _FriendsPageState extends State<FriendsPage> {
     );
   }
 
-  Widget _friendRow(_Friend f) {
-    final color = switch (f.state) {
-      _FriendState.online => MenuColors.greenDeep,
-      _FriendState.playing => const Color(0xFFF57C00),
-      _FriendState.offline => MenuColors.frostEdge,
-    };
-    final label = switch (f.state) {
-      _FriendState.online => 'INVITE',
-      _FriendState.playing => 'JOIN',
-      _FriendState.offline => 'INVITE',
-    };
+  Widget _friendRow(Map<String, dynamic> f) {
+    final name = f['username']?.toString() ?? '';
+    final status = f['status']?.toString() ?? '';
+    final id = (f['id'] as num?)?.toInt() ?? 0;
+    final accepted = status == 'accepted';
     return _RowTile(
-      leading: MenuAvatar(initial: f.name[0], color: color),
-      title: f.name,
-      subtitle: f.status,
+      leading: MenuAvatar(initial: name.isEmpty ? '?' : name[0], color: MenuColors.aquaDeep),
+      title: name,
+      subtitle: status,
       trailing: SizedBox(
         width: 68,
         child: MenuPressButton(
-          onTap: () => _invite(f),
+          onTap: () {
+            if (status == 'incoming') {
+              AccountService.instance.acceptFriend(id);
+            } else if (status == 'accepted') {
+              AccountService.instance.inviteFriend(id);
+              _toast(context, 'Invite sent to $name');
+            } else {
+              _toast(context, 'Pending request');
+            }
+          },
           height: 30,
           depth: 4,
           radius: 10,
-          faceColors: f.state == _FriendState.offline
-              ? const [Colors.white, MenuColors.frost]
-              : const [MenuColors.green, MenuColors.greenDeep],
-          edgeColor: f.state == _FriendState.offline
-              ? MenuColors.frostEdge
-              : MenuColors.greenEdge,
+          faceColors: accepted
+              ? const [MenuColors.green, MenuColors.greenDeep]
+              : const [Colors.white, MenuColors.frost],
+          edgeColor: accepted ? MenuColors.greenEdge : MenuColors.frostEdge,
           child: Text(
-            label,
+            status == 'incoming' ? 'ACCEPT' : (accepted ? 'INVITE' : 'PENDING'),
             style: TextStyle(
-              color: f.state == _FriendState.offline
-                  ? MenuColors.navy
-                  : Colors.white,
-              fontSize: 9.5,
+              color: accepted ? Colors.white : MenuColors.navy,
+              fontSize: 9,
               fontWeight: FontWeight.w900,
             ),
           ),
@@ -644,6 +693,23 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   @override
+  void initState() {
+    super.initState();
+    AccountService.instance.connect().then((_) {
+      AccountService.instance.requestSettings();
+    });
+    AccountService.instance.addListener(_onUpdate);
+  }
+
+  void _onUpdate() => setState(() {});
+
+  @override
+  void dispose() {
+    AccountService.instance.removeListener(_onUpdate);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: PlayerProfile.instance,
@@ -671,13 +737,9 @@ class _SettingsPageState extends State<SettingsPage> {
             child: Column(
               children: [
                 _toggle('Sound effects', 'Tiles, buttons and score', p.sound,
-                    p.setSound),
+                    (v) { p.setSound(v); AccountService.instance.updateSettings(sound: v); }),
                 _toggle('Music', 'Menu and table soundtrack', p.music,
-                    p.setMusic),
-                _toggle('Vibration', 'Haptic feedback on plays', p.vibration,
-                    p.setVibration),
-                _toggle('Show hints', 'Highlight playable tiles', p.hints,
-                    p.setHints),
+                    (v) { p.setMusic(v); AccountService.instance.updateSettings(music: v); AudioService.instance.setMusicEnabled(v); }),
               ],
             ),
           ),
@@ -869,6 +931,71 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
+  @override
+  void initState() {
+    super.initState();
+    AccountService.instance.connect().then((_) {
+      AccountService.instance.requestProfile();
+    });
+    AccountService.instance.addListener(_onUpdate);
+  }
+
+  void _onUpdate() => setState(() {});
+
+  @override
+  void dispose() {
+    AccountService.instance.removeListener(_onUpdate);
+    super.dispose();
+  }
+
+  Future<void> _showProfileAccountDialog(BuildContext context) async {
+    final userCtrl = TextEditingController(text: AccountService.instance.username ?? '');
+    final passCtrl = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Account'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: userCtrl, decoration: const InputDecoration(labelText: 'Username')),
+            TextField(controller: passCtrl, decoration: const InputDecoration(labelText: 'Password'), obscureText: true),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => AccountService.instance.login(userCtrl.text.trim(), passCtrl.text),
+                    child: const Text('Login'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => AccountService.instance.register(userCtrl.text.trim(), passCtrl.text),
+                    child: const Text('Register'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              AccountService.instance.logout();
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Logout'),
+          ),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close')),
+        ],
+      ),
+    );
+    userCtrl.dispose();
+    passCtrl.dispose();
+  }
+
   Future<void> _editName() async {
     final controller = TextEditingController(
       text: PlayerProfile.instance.name,
@@ -932,11 +1059,10 @@ class _ProfilePageState extends State<ProfilePage> {
               children: [
                 Row(
                   children: [
-                    MenuAvatar(
+                    _LevelAvatar(
                       initial: p.initial,
                       color: p.avatar.color,
-                      size: 64,
-                      ring: true,
+                      level: p.level,
                     ),
                     const SizedBox(width: 14),
                     Expanded(
@@ -956,7 +1082,7 @@ class _ProfilePageState extends State<ProfilePage> {
                           ),
                           const SizedBox(height: 3),
                           Text(
-                            'GOLD III  ·  LEVEL ${p.level}',
+                            '${p.wins} WINS  ·  ${p.losses} LOSSES',
                             style: TextStyle(
                               color: MenuColors.goldEdge,
                               fontSize: 11,
@@ -964,21 +1090,40 @@ class _ProfilePageState extends State<ProfilePage> {
                               letterSpacing: 1,
                             ),
                           ),
-                          const SizedBox(height: 6),
-                          MenuProgress(value: p.xpFraction, height: 8),
-                          const SizedBox(height: 4),
-                          Text(
-                            '${p.xp} / ${p.xpGoal} XP',
-                            style: TextStyle(
-                              color: MenuColors.navy.withValues(alpha: 0.6),
-                              fontSize: 9.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
                         ],
                       ),
                     ),
                   ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Text(
+                      'LEVEL ${p.level}',
+                      style: const TextStyle(
+                        color: MenuColors.navy,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      '${p.xp} / ${p.xpGoal} XP',
+                      style: const TextStyle(
+                        color: MenuColors.goldEdge,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                MenuProgress(
+                  value: p.xpFraction,
+                  color: MenuColors.aquaDeep,
+                  height: 10,
                 ),
                 const SizedBox(height: 14),
                 MenuPressButton(
@@ -1013,31 +1158,131 @@ class _ProfilePageState extends State<ProfilePage> {
                 for (var i = 0; i < kAvatars.length; i++)
                   GestureDetector(
                     onTap: () => p.setAvatar(i),
-                    child: MenuAvatar(
+                    child: _AvatarChoice(
                       initial: p.name.isEmpty ? '?' : p.name[0].toUpperCase(),
                       color: kAvatars[i].color,
-                      size: 46,
-                      ring: i == p.avatarIndex,
+                      selected: i == p.avatarIndex,
                     ),
                   ),
               ],
             ),
           ),
           const SizedBox(height: 14),
+          const MenuSectionLabel('ACCOUNT'),
+          MenuPanel(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: Column(
+              children: [
+                ListenableBuilder(
+                  listenable: AccountService.instance,
+                  builder: (_, __) {
+                    final a = AccountService.instance;
+                    return Text(
+                      a.username == null
+                          ? 'Not logged in'
+                          : 'Logged in as ${a.username}  •  ${a.coins} coins  ${a.gems} gems',
+                      style: const TextStyle(
+                        color: MenuColors.navy,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: MenuPressButton(
+                        onTap: () => _showProfileAccountDialog(context),
+                        height: 42,
+                        depth: 5,
+                        radius: 13,
+                        faceColors: const [
+                          MenuColors.skyTop,
+                          MenuColors.skyMid,
+                        ],
+                        edgeColor: MenuColors.skyDeep,
+                        child: const Text(
+                          'LOGIN / REGISTER',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: MenuPressButton(
+                        onTap: () =>
+                            AccountService.instance.claimAdReward('coins'),
+                        height: 42,
+                        depth: 5,
+                        radius: 13,
+                        faceColors: const [
+                          MenuColors.green,
+                          MenuColors.greenDeep,
+                        ],
+                        edgeColor: MenuColors.greenEdge,
+                        child: const Text(
+                          'AD +50 COINS',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
           const MenuSectionLabel('STATS'),
           MenuPanel(
-            padding: const EdgeInsets.symmetric(vertical: 12),
+            padding: const EdgeInsets.all(10),
             child: Row(
               children: [
-                _ProfileStat('${p.wins}', 'WINS', MenuColors.greenDeep),
-                const _ProfileDivider(),
-                _ProfileStat('${p.losses}', 'LOSSES', MenuColors.pink),
-                const _ProfileDivider(),
-                _ProfileStat(
-                    '${p.bestStreak}', 'STREAK', const Color(0xFFF57C00)),
-                const _ProfileDivider(),
-                _ProfileStat('#${12 - p.wins.clamp(0, 11)}', 'RANK',
-                    MenuColors.aquaDeep),
+                Expanded(
+                  child: _ProfileStatTile(
+                    '${p.wins}',
+                    'WINS',
+                    MenuColors.greenDeep,
+                    Icons.emoji_events_rounded,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _ProfileStatTile(
+                    '${p.losses}',
+                    'LOSSES',
+                    MenuColors.pink,
+                    Icons.close_rounded,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _ProfileStatTile(
+                    '${p.bestStreak}',
+                    'STREAK',
+                    const Color(0xFFF57C00),
+                    Icons.local_fire_department_rounded,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _ProfileStatTile(
+                    '#${12 - p.wins.clamp(0, 11)}',
+                    'RANK',
+                    MenuColors.aquaDeep,
+                    Icons.military_tech_rounded,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1062,51 +1307,62 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 }
 
-class _ProfileStat extends StatelessWidget {
+class _ProfileStatTile extends StatelessWidget {
   final String value;
   final String label;
   final Color color;
+  final IconData icon;
 
-  const _ProfileStat(this.value, this.label, this.color);
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Column(
-        children: [
-          Text(
-            value,
-            style: const TextStyle(
-              color: MenuColors.navy,
-              fontSize: 19,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 9,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 0.8,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ProfileDivider extends StatelessWidget {
-  const _ProfileDivider();
+  const _ProfileStatTile(this.value, this.label, this.color, this.icon);
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 1,
-      height: 34,
-      color: MenuColors.navy.withValues(alpha: 0.1),
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.white, Color(0xFFEAF5FF)],
+        ),
+        border: Border.all(color: Colors.white, width: 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: MenuColors.navy.withValues(alpha: 0.18),
+            blurRadius: 6,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color, size: 16),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(
+              color: MenuColors.navy,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+              height: 1.1,
+            ),
+          ),
+          const SizedBox(height: 1),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: color,
+              fontSize: 8,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.6,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1121,36 +1377,210 @@ class _MatchRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _RowTile(
-      leading: Container(
-        width: 40,
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(9),
-          border: Border.all(color: color.withValues(alpha: 0.5)),
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.white, Color(0xFFEAF5FF)],
         ),
-        child: Center(
-          child: Text(
-            result,
+        border: Border.all(color: Colors.white, width: 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: MenuColors.navy.withValues(alpha: 0.16),
+            blurRadius: 6,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: color.withValues(alpha: 0.5)),
+            ),
+            child: Center(
+              child: Text(
+                result,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  mode,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: MenuColors.navy,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  'Ranked match',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: MenuColors.navy.withValues(alpha: 0.58),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            points,
             style: TextStyle(
               color: color,
-              fontSize: 9.5,
+              fontSize: 13,
               fontWeight: FontWeight.w900,
             ),
           ),
-        ),
+        ],
       ),
-      title: mode,
-      subtitle: 'Ranked match',
-      trailing: Text(
-        points,
-        style: TextStyle(
-          color: color,
-          fontSize: 13,
-          fontWeight: FontWeight.w900,
-        ),
+    );
+  }
+}
+
+/// Profile avatar with a raised gold ring and the level badge on its corner.
+class _LevelAvatar extends StatelessWidget {
+  final String initial;
+  final Color color;
+  final int level;
+
+  const _LevelAvatar({
+    required this.initial,
+    required this.color,
+    required this.level,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 72,
+      height: 72,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned(
+            left: 0,
+            top: 0,
+            right: 6,
+            bottom: 6,
+            child: Container(
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: const LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [MenuColors.gold, MenuColors.goldDeep],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: MenuColors.goldEdge.withValues(alpha: 0.55),
+                    blurRadius: 8,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: MenuAvatar(
+                initial: initial,
+                color: color,
+                size: 54,
+              ),
+            ),
+          ),
+          Positioned(
+            right: 0,
+            bottom: 0,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(
+                color: MenuColors.navy,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: MenuColors.gold, width: 1.6),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Text(
+                '$level',
+                style: const TextStyle(
+                  color: MenuColors.gold,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
+    );
+  }
+}
+
+/// Avatar choice in the picker: the selected one sits raised on a gold base.
+class _AvatarChoice extends StatelessWidget {
+  final String initial;
+  final Color color;
+  final bool selected;
+
+  const _AvatarChoice({
+    required this.initial,
+    required this.color,
+    required this.selected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 140),
+      curve: Curves.easeOut,
+      transform: Matrix4.translationValues(0, selected ? -3 : 0, 0),
+      padding: EdgeInsets.all(selected ? 4 : 3),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: selected
+            ? const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [MenuColors.gold, MenuColors.goldDeep],
+              )
+            : null,
+        boxShadow: [
+          BoxShadow(
+            color: MenuColors.navy.withValues(alpha: selected ? 0.32 : 0.16),
+            blurRadius: selected ? 8 : 5,
+            offset: Offset(0, selected ? 4 : 2),
+          ),
+        ],
+      ),
+      child: MenuAvatar(initial: initial, color: color, size: 42),
     );
   }
 }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../services/audio_service.dart';
+
 /// Palette shared by the menu, the in-game header and the result dialog.
 class ArcadeColors {
   ArcadeColors._();
@@ -109,7 +111,12 @@ class _ArcadeButtonState extends State<ArcadeButton> {
       onTapDown: (_) => setState(() => _down = true),
       onTapUp: (_) => setState(() => _down = false),
       onTapCancel: () => setState(() => _down = false),
-      onTap: widget.onTap,
+      onTap: widget.onTap == null
+          ? null
+          : () {
+              AudioService.instance.playClick();
+              widget.onTap!();
+            },
       child: SizedBox(
         height: h + d,
         child: Stack(

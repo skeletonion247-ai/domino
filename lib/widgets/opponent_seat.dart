@@ -13,6 +13,10 @@ class OpponentSeat extends StatelessWidget {
   final double turnProgress;
   final Axis direction;
 
+  /// Hides the face-down tile fan, e.g. while the end-of-hand reveal shows the
+  /// same tiles face-up on the table.
+  final bool hideTiles;
+
   const OpponentSeat({
     super.key,
     required this.player,
@@ -20,6 +24,7 @@ class OpponentSeat extends StatelessWidget {
     this.isCurrentTurn = false,
     this.turnProgress = 1.0,
     this.direction = Axis.horizontal,
+    this.hideTiles = false,
   });
 
   static const List<Color> _colors = [
@@ -230,6 +235,7 @@ class OpponentSeat extends StatelessWidget {
   }
 
   Widget _tileFan(BuildContext context) {
+    if (hideTiles) return const SizedBox.shrink();
     final count = player.hand.length.clamp(0, 7);
     if (count == 0) return const SizedBox.shrink();
 

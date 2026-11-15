@@ -193,6 +193,26 @@ class PlayerProfile extends ChangeNotifier {
     _changed();
   }
 
+  void setCoins(int value) {
+    coins = value;
+    _changed();
+  }
+
+  void setGems(int value) {
+    gems = value;
+    _changed();
+  }
+
+  void setWins(int value) {
+    wins = value;
+    _changed();
+  }
+
+  void setLosses(int value) {
+    losses = value;
+    _changed();
+  }
+
   void addXp(int amount) {
     xp += amount;
     while (xp >= xpGoal) {

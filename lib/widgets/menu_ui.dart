@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../models/domino_tile.dart';
+import '../services/audio_service.dart';
 import 'sprite_domino_tile.dart';
 
 /// Colours shared by the main menu and every sub-page so the look stays
@@ -354,7 +355,12 @@ class _MenuPressButtonState extends State<MenuPressButton> {
       onTapDown: (_) => setState(() => _down = true),
       onTapUp: (_) => setState(() => _down = false),
       onTapCancel: () => setState(() => _down = false),
-      onTap: widget.onTap,
+      onTap: widget.onTap == null
+          ? null
+          : () {
+              AudioService.instance.playClick();
+              widget.onTap!();
+            },
       child: SizedBox(
         height: h + d,
         width: widget.width,

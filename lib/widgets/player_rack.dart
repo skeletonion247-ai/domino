@@ -14,6 +14,10 @@ class PlayerRack extends StatelessWidget {
   final void Function(int oldIndex, int newIndex) onReorder;
   final ValueChanged<DominoTile?>? onPlayDragChanged;
 
+  /// Hides the tiles but keeps the tray, e.g. while the end-of-hand reveal
+  /// shows them face-up on the table.
+  final bool hideTiles;
+
   const PlayerRack({
     super.key,
     required this.hand,
@@ -24,6 +28,7 @@ class PlayerRack extends StatelessWidget {
     required this.onSort,
     required this.onReorder,
     this.onPlayDragChanged,
+    this.hideTiles = false,
   });
 
   @override
@@ -64,7 +69,9 @@ class PlayerRack extends StatelessWidget {
             right: 12,
             top: 2,
             bottom: 2,
-            child: hand.isEmpty
+            child: hideTiles
+                ? const SizedBox.shrink()
+                : hand.isEmpty
                 ? const Center(
                     child: Text(
                       'No tiles',

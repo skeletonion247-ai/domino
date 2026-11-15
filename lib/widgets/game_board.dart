@@ -651,7 +651,16 @@ class SnakeLayout {
   final Rect bounds;
   final double scale;
 
-  SnakeLayout(this.positions, this.bounds, this.scale);
+  /// True when the smart layout was rejected (overlap) and the classic
+  /// layout is being used instead.
+  final bool fellBack;
+
+  SnakeLayout(
+    this.positions,
+    this.bounds,
+    this.scale, {
+    this.fellBack = false,
+  });
 }
 
 Rect _layoutBounds(List<_Pos> positions, double w, double h) {
@@ -676,6 +685,9 @@ SnakeLayout computeLayout(
   List<PlacedTile> board, {
   required double maxWidth,
   required double maxHeight,
+  bool smart = false,
+  double topRun = 3.0,
+  double bottomRun = 3.0,
 }) {
   if (board.isEmpty) return SnakeLayout(const [], Rect.zero, 1.0);
 
@@ -694,7 +706,8 @@ SnakeLayout computeLayout(
   final topMiddle = segmentUnits(middle.where((p) => p.side == 'top'));
   final bottomMiddle = segmentUnits(middle.where((p) => p.side == 'bottom'));
 
-  List<TilePlacement> plan(double s) {
+  List<TilePlacement> plan(double s, double topRun, double bottomRun,
+      {bool capMiddle = false}) {
     final placements = <TilePlacement>[];
     final center = board.first.tile;
     final centerHorizontal = !center.isDouble;
@@ -728,12 +741,20 @@ SnakeLayout computeLayout(
       return extent;
     }
 
+    // Practice caps the middle: each side lays only its first tile
+    // horizontally, then the second tile turns. With a crossed centre that is
+    // 0.5 + 1 + 1 = 2.5; with a horizontal centre it is 3.
+    double firstTileUnits(List<PlacedTile> chain) =>
+        chain.isEmpty ? 0 : (chain.first.tile.isDouble ? 0.5 : 1.0);
+    final leftRun = capMiddle ? firstTileUnits(left) : leftMiddle;
+    final rightRun = capMiddle ? firstTileUnits(right) : rightMiddle;
+
     final lineLeft =
         -centerW / 2 -
-        (left.isNotEmpty ? 2.0 + firstRunExtent(left, leftMiddle) : 0.0);
+        (left.isNotEmpty ? 2.0 + firstRunExtent(left, leftRun) : 0.0);
     final lineRight =
         centerW / 2 +
-        (right.isNotEmpty ? 2.0 + firstRunExtent(right, rightMiddle) : 0.0);
+        (right.isNotEmpty ? 2.0 + firstRunExtent(right, rightRun) : 0.0);
 
     _addSide(
       placements,
@@ -741,9 +762,10 @@ SnakeLayout computeLayout(
       0,
       centerW,
       s,
-      leftMiddle,
+      leftRun,
       lineLimit: lineRight,
       linePassRight: true,
+      vRun: topRun,
     );
     _addSide(
       placements,
@@ -751,34 +773,120 @@ SnakeLayout computeLayout(
       2,
       centerW,
       s,
-      rightMiddle,
+      rightRun,
       lineLimit: lineLeft,
       linePassRight: false,
+      vRun: bottomRun,
     );
-    _addSide(placements, top, 1, centerH, s, topMiddle);
-    _addSide(placements, bottom, 3, centerH, s, bottomMiddle);
+    _addSide(placements, top, 1, centerH, s, topMiddle, vRun: 3.0);
+    _addSide(placements, bottom, 3, centerH, s, bottomMiddle, vRun: 3.0);
     return placements;
   }
 
-  // Build the plan once at full size, then scale the whole thing to the board
-  // in a couple of passes. No 0.02-step shrink loop: this keeps the largest
-  // scale that fits inside the red boundary.
-  var s = 0.75;
-  var placements = plan(s);
-  var bounds = _placementsBounds(placements, s);
-  for (var pass = 0; pass < 3; pass++) {
-    final fit = math.min(
-      maxWidth * 0.94 / math.max(bounds.width, 1),
-      maxHeight * 0.94 / math.max(bounds.height, 1),
-    );
-    final next = math.max(0.1, math.min(0.75, s * fit));
-    if ((next - s).abs() < 0.001) break;
-    s = next;
-    placements = plan(s);
-    bounds = _placementsBounds(placements, s);
+  // Build the original plan and let it settle to the board. [cap] is the
+  // largest scale allowed: 0.75 keeps the classic look, 1.0 uses the full
+  // native sprite resolution when the screen has room.
+  SnakeLayout build(double cap, {bool capMiddle = false}) {
+    var s = 0.75;
+    var placements = plan(s, 3.0, 3.0, capMiddle: capMiddle);
+    var bounds = _placementsBounds(placements, s);
+    for (var pass = 0; pass < 3; pass++) {
+      final fit = math.min(
+        maxWidth * 0.94 / math.max(bounds.width, 1),
+        maxHeight * 0.94 / math.max(bounds.height, 1),
+      );
+      final next = math.max(0.1, math.min(cap, s * fit));
+      if ((next - s).abs() < 0.001) break;
+      s = next;
+      placements = plan(s, 3.0, 3.0, capMiddle: capMiddle);
+      bounds = _placementsBounds(placements, s);
+    }
+    return SnakeLayout(placements, bounds, s);
   }
 
-  return SnakeLayout(placements, bounds, s);
+  // Original layout, exactly as it was: 0.75 cap, original turn pattern.
+  // Practice also caps the middle row here, so the opening keeps the cap even
+  // while it stays at the classic size.
+  final classic = build(0.75, capMiddle: smart);
+  if (!smart) return classic;
+
+  // Smart path: plan the pattern once, then scale the whole shape to the
+  // board. Planning once keeps the turn pattern identical at every scale
+  // (it cannot reshuffle between moves), and scaling the finished shape fits
+  // the screen exactly instead of re-planning with different gaps.
+  SnakeLayout buildScaled(double cap, double topRun, double bottomRun) {
+    const base = 0.75;
+    final raw = plan(base, topRun, bottomRun, capMiddle: true);
+    final rawBounds = _placementsBounds(raw, base);
+    final fit = math.min(
+      maxWidth * 0.94 / math.max(rawBounds.width, 1),
+      maxHeight * 0.94 / math.max(rawBounds.height, 1),
+    );
+    final fitted = math.max(0.1, math.min(cap, base * fit));
+    final k = fitted / base;
+    return SnakeLayout(
+      [
+        for (final p in raw)
+          TilePlacement(p.tile, p.offset * k, p.horizontal, p.isFlipped,
+              p.angle),
+      ],
+      Rect.fromLTRB(rawBounds.left * k, rawBounds.top * k,
+          rawBounds.right * k, rawBounds.bottom * k),
+      fitted,
+    );
+  }
+
+  // Practice: let the snake use the full native sprite size wherever the
+  // screen has room. The turn pattern is unchanged, only the scale can grow.
+  // The opening tiles stay exactly at the classic size, then the cap rises a
+  // little per tile instead of jumping straight to native size, which looked
+  // like a sudden zoom-in.
+  // If the larger shape would overlap a tile, fall back to the classic
+  // layout instead of letting tiles hide.
+  if (board.length <= 8) return classic;
+  final grow = math.min(1.0, 0.75 + (board.length - 8) * 0.02);
+  final wide = buildScaled(grow, topRun, bottomRun);
+  if (!_placementsOverlap(wide.positions, wide.scale)) return wide;
+  return SnakeLayout(
+    classic.positions,
+    classic.bounds,
+    classic.scale,
+    fellBack: true,
+  );
+}
+
+/// Which horizontal rows are already full (at least four tiles) with the
+/// classic 3-tile vertical runs: [top] is the 2nd line above the middle,
+/// [bottom] is the 3rd line below it. A vertical run may only grow on a side
+/// whose row is already laid.
+({bool top, bool bottom}) fullHorizontalRows(
+  List<PlacedTile> board, {
+  required double maxWidth,
+  required double maxHeight,
+}) {
+  if (board.length < 5) return (top: false, bottom: false);
+  final layout = computeLayout(
+    board,
+    maxWidth: maxWidth,
+    maxHeight: maxHeight,
+    smart: true,
+  );
+  final threshold = _tileH * layout.scale * 0.5;
+  final rows = <double, int>{};
+  for (final p in layout.positions) {
+    // Same row tiles share the same centre line; round to half a pixel so
+    // tiny floating point differences cannot split a row.
+    final key = (p.offset.dy * 2).roundToDouble() / 2;
+    rows[key] = (rows[key] ?? 0) + 1;
+  }
+  var top = false;
+  var bottom = false;
+  for (final row in rows.entries) {
+    if (row.value < 4) continue;
+    if (row.key < -threshold) top = true;
+    if (row.key > threshold) bottom = true;
+  }
+  return (top: top, bottom: bottom);
 }
 
 void _addSide(
@@ -790,6 +898,7 @@ void _addSide(
   double middleN, {
   double? lineLimit,
   bool linePassRight = true,
+  double vRun = 3.0,
 }) {
   if (tiles.isEmpty) return;
   final tileW = _tileW * s;
@@ -851,8 +960,8 @@ void _addSide(
       if (turning) {
         dir = nextDir;
         turns++;
-        // Vertical runs are 3 tiles; horizontal runs stay 4.
-        segLeft = (nextDir == 1 || nextDir == 3) ? 3.0 : 4.0;
+        // Vertical runs default to 3 tiles; horizontal runs stay 4.
+        segLeft = (nextDir == 1 || nextDir == 3) ? vRun : 4.0;
       }
     }
 
@@ -918,6 +1027,27 @@ Rect _placementsBounds(List<TilePlacement> placements, double s) {
   return Rect.fromLTRB(minX, minY, maxX, maxY);
 }
 
+/// True when any two placed tiles visibly overlap. Used to reject a wider
+/// layout instead of letting tiles hide behind each other.
+bool _placementsOverlap(List<TilePlacement> placements, double s) {
+  final rects = [
+    for (final p in placements)
+      Rect.fromCenter(
+        center: p.offset,
+        width: (p.horizontal ? _tileW : _tileH) * s,
+        height: (p.horizontal ? _tileH : _tileW) * s,
+      ),
+  ];
+  for (var i = 0; i < rects.length; i++) {
+    for (var j = i + 1; j < rects.length; j++) {
+      final inter = rects[i].intersect(rects[j]);
+      if (inter.isEmpty) continue;
+      if (inter.width * inter.height > 1.0) return true;
+    }
+  }
+  return false;
+}
+
 bool _hasOverlap(List<_Pos> positions, double w, double h) {
   final rects = [
     for (final p in positions)
@@ -940,6 +1070,17 @@ bool _hasOverlap(List<_Pos> positions, double w, double h) {
 class GameBoard extends StatelessWidget {
   final List<PlacedTile> board;
 
+  /// Lets a grown snake use the full native sprite size (practice mode).
+  /// Online leaves it off so its layout is untouched.
+  final bool smart;
+
+  /// Vertical run length for the top line (3 keeps the classic snake; 4
+  /// fills the free band above on tall screens).
+  final double topRun;
+
+  /// Vertical run length for the bottom line, independent of [topRun].
+  final double bottomRun;
+
   /// Builds the visual for a placed tile. When omitted the code-drawn
   /// [DominoTileWidget] is used.
   final Widget Function(
@@ -950,7 +1091,14 @@ class GameBoard extends StatelessWidget {
   })?
   tileBuilder;
 
-  const GameBoard({super.key, required this.board, this.tileBuilder});
+  const GameBoard({
+    super.key,
+    required this.board,
+    this.smart = false,
+    this.topRun = 3.0,
+    this.bottomRun = 3.0,
+    this.tileBuilder,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -983,6 +1131,9 @@ class GameBoard extends StatelessWidget {
           board,
           maxWidth: constraints.maxWidth,
           maxHeight: constraints.maxHeight,
+          smart: smart,
+          topRun: topRun,
+          bottomRun: bottomRun,
         );
         final bounds = layout.bounds;
         final scale = layout.scale;

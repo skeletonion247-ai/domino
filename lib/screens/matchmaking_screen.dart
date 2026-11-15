@@ -11,6 +11,7 @@ import '../models/player.dart';
 import '../theme/arcade_ui.dart';
 import '../widgets/game_board.dart';
 import '../widgets/hand_over_dialog.dart';
+import '../widgets/hand_reveal.dart';
 import '../widgets/opponent_seat.dart';
 import '../widgets/player_rack.dart';
 import '../widgets/score_header.dart';
@@ -52,9 +53,16 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   int _waiting = 1;
   int _secondsRemaining = 20;
   String _phase = 'ready';
+  /// Players currently in the matchmaking queue, in join order (so index =
+  /// seat once the room starts). Sent by the server with 'queued'.
+  List<Map<String, dynamic>> _queuePlayers = [];
   String? _error;
   DominoTile? _selected;
   final GlobalKey _boardKey = GlobalKey();
+  final GlobalKey _tableKey = GlobalKey();
+  final GlobalKey _rackKey = GlobalKey();
+  HandRevealRun? _revealRun;
+  bool _revealing = false;
   bool _resultRecorded = false;
   bool _resultDialogShown = false;
   String? _lastPlacedId;
@@ -95,6 +103,8 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     _passTimer?.cancel();
     _flyEntry?.remove();
     _flyEntry = null;
+    _revealRun?.dispose();
+    _revealRun = null;
     _flyController.dispose();
     _turnProgress.dispose();
     _nameController.dispose();
@@ -183,12 +193,20 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
             _secondsRemaining =
                 (message['secondsRemaining'] as num?)?.toInt() ??
                 _secondsRemaining;
+            final players = message['players'];
+            _queuePlayers = players is List
+                ? players
+                      .whereType<Map>()
+                      .map((p) => Map<String, dynamic>.from(p))
+                      .toList()
+                : const [];
           });
           break;
         case 'start':
           setState(() {
             _phase = 'playing';
             _seat = (message['seat'] as num?)?.toInt() ?? _seat;
+            _queuePlayers = const [];
             _resultRecorded = false;
             _resultDialogShown = false;
             _localHand = null;
@@ -227,9 +245,24 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
             message['status']?.toString() ?? 'playing',
           );
           _syncAutoPass();
+          if (message['status']?.toString() == 'handover') {
+            final hands = _parseHands(message['allHands']);
+            if (hands != null) _playRevealHands(hands);
+          }
           if (message['type'] == 'gameover') {
-            _recordOnlineResult(message);
-            _showResultDialog(message);
+            final hands = _parseHands(message['allHands']);
+            if (hands != null) {
+              _playRevealHands(
+                hands,
+                onDone: () {
+                  _recordOnlineResult(message);
+                  _showResultDialog(message);
+                },
+              );
+            } else {
+              _recordOnlineResult(message);
+              _showResultDialog(message);
+            }
           }
           break;
         case 'auth':
@@ -391,6 +424,64 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
       win: (_seat % 2) == winner,
       scoreXp: (s0 + s1) ~/ 10,
     );
+  }
+
+  List<List<DominoTile>>? _parseHands(dynamic raw) {
+    if (raw is! List || raw.length != 4) return null;
+    final hands = <List<DominoTile>>[];
+    for (final hand in raw) {
+      if (hand is! List) return null;
+      hands.add([
+        for (final item in hand)
+          if (item is List && item.length == 2)
+            DominoTile((item[0] as num).toInt(), (item[1] as num).toInt()),
+      ]);
+    }
+    return hands;
+  }
+
+  Rect? _rectOf(GlobalKey key) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  /// Plays the shared end-of-hand reveal. Seats are mapped to the local view:
+  /// you at the bottom, then left, top, right.
+  void _playRevealHands(
+    List<List<DominoTile>> hands, {
+    VoidCallback? onDone,
+  }) {
+    if (_revealRun != null) {
+      onDone?.call();
+      return;
+    }
+    final table = _rectOf(_tableKey);
+    if (table == null) {
+      onDone?.call();
+      return;
+    }
+    final seat = _seat < 0 ? 0 : _seat;
+    setState(() => _revealing = true);
+    _revealRun = HandReveal.play(
+      context: context,
+      vsync: this,
+      table: table,
+      rack: _rectOf(_rackKey),
+      hands: hands,
+      sideOfHand: (s) => ((s - seat) % 4 + 4) % 4,
+    );
+    if (_revealRun == null) {
+      setState(() => _revealing = false);
+      onDone?.call();
+      return;
+    }
+    _revealRun!.done.whenComplete(() {
+      _revealRun = null;
+      if (!mounted) return;
+      setState(() => _revealing = false);
+      onDone?.call();
+    });
   }
 
   void _connectionFailed(Object error) {
@@ -747,7 +838,39 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   @override
   Widget build(BuildContext context) {
     if (_state != null) return _buildGame();
-    return _buildMatchmaking();
+    // Fade + rise the lobby card in once; later rebuilds (countdown, players
+    // joining) do not replay it.
+    return _LobbyEntrance(child: _buildMatchmaking());
+  }
+
+  /// Four 2v2 seats in join order (seat index = team slot: even = blue,
+  /// odd = red). Unknown players show as open seats.
+  List<_LobbySeat> _lobbySeats() {
+    final seats = <_LobbySeat>[];
+    for (var i = 0; i < 4; i++) {
+      if (i < _queuePlayers.length) {
+        final p = _queuePlayers[i];
+        seats.add(
+          _LobbySeat(
+            name: (p['name'] ?? 'Player').toString(),
+            you: p['you'] == true,
+            bot: p['bot'] == true,
+          ),
+        );
+      } else if (_queuePlayers.isEmpty && i == 0) {
+        seats.add(_LobbySeat(name: _lobbyName, you: true));
+      } else {
+        seats.add(const _LobbySeat());
+      }
+    }
+    return seats;
+  }
+
+  String get _lobbyName {
+    final typed = _nameController.text.trim();
+    if (typed.isNotEmpty) return typed;
+    final saved = PlayerProfile.instance.name.trim();
+    return saved.isEmpty ? 'YOU' : saved;
   }
 
   Widget _buildMatchmaking() {
@@ -778,31 +901,20 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(
-                        Icons.groups_rounded,
-                        color: ArcadeColors.skyDeep,
-                        size: 54,
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'FIND A MATCH',
-                        style: TextStyle(
-                          color: ArcadeColors.navy,
-                          fontSize: 24,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 1.5,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
+                      const _LobbyHeader(),
+                      const SizedBox(height: 14),
+                      _TeamBoard(seats: _lobbySeats()),
+                      const SizedBox(height: 10),
                       Text(
                         'We’ll wait 20 seconds for players, then fill any open seats with bots.',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: ArcadeColors.navy.withValues(alpha: 0.7),
+                          fontSize: 11.5,
                           height: 1.4,
                         ),
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 18),
                       if (!widget.autoJoin && !joining) ...[
                         TextField(
                           controller: _nameController,
@@ -865,29 +977,39 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                         Row(
                           children: [
                             Expanded(
-                              child: OutlinedButton(
-                                onPressed: () => _sendAuth('register'),
-                                child: const Text('Register'),
+                              child: _MiniButton(
+                                'REGISTER',
+                                () => _sendAuth('register'),
+                                const [ArcadeColors.skyTop, ArcadeColors.skyMid],
+                                ArcadeColors.skyDeep,
                               ),
                             ),
                             const SizedBox(width: 8),
                             Expanded(
-                              child: OutlinedButton(
-                                onPressed: () => _sendAuth('login'),
-                                child: const Text('Login'),
+                              child: _MiniButton(
+                                'LOGIN',
+                                () => _sendAuth('login'),
+                                const [
+                                  ArcadeColors.green,
+                                  ArcadeColors.greenDeep,
+                                ],
+                                ArcadeColors.greenEdge,
                               ),
                             ),
                             const SizedBox(width: 8),
                             Expanded(
-                              child: OutlinedButton(
-                                onPressed: () {
+                              child: _MiniButton(
+                                'RANKS',
+                                () {
                                   _ensureConnected().then((_) {
                                     _send({'type': 'leaderboard'});
                                   }).catchError((error) {
                                     _connectionFailed(error);
                                   });
                                 },
-                                child: const Text('Leaderboard'),
+                                const [ArcadeColors.gold, ArcadeColors.goldDeep],
+                                ArcadeColors.goldEdge,
+                                textColor: ArcadeColors.navy,
                               ),
                             ),
                           ],
@@ -901,16 +1023,26 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                         Row(
                           children: [
                             Expanded(
-                              child: OutlinedButton(
-                                onPressed: () => _watchAd('coins'),
-                                child: const Text('Ad: +50 coins'),
+                              child: _MiniButton(
+                                'AD +50 COINS',
+                                () => _watchAd('coins'),
+                                const [
+                                  ArcadeColors.green,
+                                  ArcadeColors.greenDeep,
+                                ],
+                                ArcadeColors.greenEdge,
                               ),
                             ),
                             const SizedBox(width: 8),
                             Expanded(
-                              child: OutlinedButton(
-                                onPressed: () => _watchAd('gems'),
-                                child: const Text('Ad: +5 gems'),
+                              child: _MiniButton(
+                                'AD +5 GEMS',
+                                () => _watchAd('gems'),
+                                const [
+                                  ArcadeColors.aqua,
+                                  ArcadeColors.aquaDeep,
+                                ],
+                                const Color(0xFF0B6B5C),
                               ),
                             ),
                           ],
@@ -938,28 +1070,34 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                           ),
                         ),
                       ] else ...[
-                        const CircularProgressIndicator(
-                          valueColor: AlwaysStoppedAnimation(
-                            ArcadeColors.skyDeep,
-                          ),
+                        _QueueStatus(
+                          phase: _phase,
+                          secondsRemaining: _secondsRemaining,
+                          waiting: _waiting,
                         ),
-                        const SizedBox(height: 18),
-                        Text(
-                          _phase == 'connecting'
-                              ? 'CONNECTING TO THE PC...'
-                              : _phase == 'playing'
-                              ? 'STARTING YOUR GAME...'
-                              : '$_secondsRemaining  •  $_waiting PLAYER${_waiting == 1 ? '' : 'S'} WAITING',
-                          style: const TextStyle(
-                            color: ArcadeColors.navy,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.8,
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ArcadeButton(
+                            onTap: _leave,
+                            height: 44,
+                            depth: 5,
+                            radius: 14,
+                            faceColors: const [
+                              Colors.white,
+                              ArcadeColors.frost,
+                            ],
+                            edgeColor: ArcadeColors.frostEdge,
+                            child: const Text(
+                              'CANCEL',
+                              style: TextStyle(
+                                color: ArcadeColors.navy,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.4,
+                              ),
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 18),
-                        TextButton(
-                          onPressed: _leave,
-                          child: const Text('CANCEL'),
                         ),
                       ],
                       if (_error != null) ...[
@@ -1013,6 +1151,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
             Expanded(
               child: ClipRect(
                 child: Stack(
+                  key: _tableKey,
                   clipBehavior: Clip.hardEdge,
                   children: [
                   const Positioned.fill(child: _FeltBackground()),
@@ -1055,6 +1194,8 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                           GameBoard(
                             key: _boardKey,
                             board: _board,
+                            // Same snake layout as practice.
+                            smart: true,
                             tileBuilder:
                                 (
                                   tile, {
@@ -1209,10 +1350,12 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
               ValueListenableBuilder<double>(
                 valueListenable: _turnProgress,
                 builder: (context, progress, _) => PlayerRack(
+                  key: _rackKey,
                   hand: _localHand ?? _hand,
                   playable: _playable,
                   isMyTurn: _myTurn,
                   turnFraction: progress,
+                  hideTiles: _revealing,
                   onTileTap: _onTileTap,
                   onSort: _sortHand,
                   onReorder: _reorderHand,
@@ -1246,6 +1389,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
         isCurrentTurn: _turn == seat,
         turnProgress: _turn == seat ? progress : 1,
         direction: direction,
+        hideTiles: _revealing,
       ),
     );
   }
@@ -1264,5 +1408,519 @@ class _FeltBackground extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const FeltTable();
+  }
+}
+
+/// Raised 3D title plate for the lobby card.
+class _LobbyHeader extends StatelessWidget {
+  const _LobbyHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 62,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            ArcadeColors.skyTop,
+            ArcadeColors.skyMid,
+            ArcadeColors.skyDeep,
+          ],
+        ),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.55), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: ArcadeColors.navyDeep.withValues(alpha: 0.45),
+            blurRadius: 12,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: FractionallySizedBox(
+                  heightFactor: 0.5,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.white.withValues(alpha: 0.38),
+                          Colors.white.withValues(alpha: 0),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.groups_rounded, color: Colors.white, size: 26),
+                SizedBox(width: 8),
+                Text(
+                  'FIND A MATCH',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Blue team on top, red team below, two seats each.
+class _TeamBoard extends StatelessWidget {
+  final List<_LobbySeat> seats;
+
+  const _TeamBoard({required this.seats});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _TeamPanel(
+          title: 'BLUE TEAM',
+          color: ArcadeColors.skyDeep,
+          seats: [seats[0], seats[2]],
+        ),
+        const SizedBox(height: 10),
+        _TeamPanel(
+          title: 'RED TEAM',
+          color: const Color(0xFFD32F2F),
+          seats: [seats[1], seats[3]],
+        ),
+      ],
+    );
+  }
+}
+
+class _TeamPanel extends StatelessWidget {
+  final String title;
+  final Color color;
+  final List<_LobbySeat> seats;
+
+  const _TeamPanel({
+    required this.title,
+    required this.color,
+    required this.seats,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withValues(alpha: 0.28), width: 1.2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: color,
+                  boxShadow: [
+                    BoxShadow(
+                      color: color.withValues(alpha: 0.6),
+                      blurRadius: 6,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                title,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 1.3,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '2v2',
+                style: TextStyle(
+                  color: color.withValues(alpha: 0.7),
+                  fontSize: 9,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(child: _SeatSlot(seat: seats[0], color: color)),
+              const SizedBox(width: 8),
+              Expanded(child: _SeatSlot(seat: seats[1], color: color)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SeatCard extends StatelessWidget {
+  final _LobbySeat seat;
+  final Color color;
+
+  const _SeatCard({super.key, required this.seat, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final empty = seat.name.isEmpty;
+    final avatarColor = seat.you
+        ? PlayerProfile.instance.avatar.color
+        : _colorForName(seat.name, color);
+    final initial = seat.name.isEmpty
+        ? '?'
+        : seat.name.substring(0, 1).toUpperCase();
+
+    return Container(
+      height: 58,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.white, Color(0xFFEAF5FF)],
+        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: seat.you ? ArcadeColors.gold : Colors.white,
+          width: seat.you ? 2 : 1.2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: ArcadeColors.navy.withValues(alpha: 0.16),
+            blurRadius: 6,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: empty ? ArcadeColors.navy.withValues(alpha: 0.08) : null,
+              gradient: empty
+                  ? null
+                  : LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Color.lerp(avatarColor, Colors.white, 0.35)!,
+                        avatarColor,
+                        Color.lerp(avatarColor, Colors.black, 0.28)!,
+                      ],
+                    ),
+              border: Border.all(
+                color: empty
+                    ? color.withValues(alpha: 0.35)
+                    : Colors.white,
+                width: 1.6,
+              ),
+            ),
+            child: Center(
+              child: empty
+                  ? Icon(
+                      Icons.person_add_alt_1_rounded,
+                      color: color.withValues(alpha: 0.55),
+                      size: 16,
+                    )
+                  : Text(
+                      initial,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  empty ? 'OPEN SEAT' : seat.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: empty
+                        ? ArcadeColors.navy.withValues(alpha: 0.45)
+                        : ArcadeColors.navy,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  empty
+                      ? 'WAITING…'
+                      : seat.you
+                      ? 'YOU'
+                      : seat.bot
+                      ? 'BOT'
+                      : 'PLAYER',
+                  style: TextStyle(
+                    color: seat.you
+                        ? ArcadeColors.goldEdge
+                        : color.withValues(alpha: 0.85),
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Stable avatar colour per player name (the server does not send avatars yet).
+Color _colorForName(String name, Color fallback) {
+  if (name.isEmpty) return fallback;
+  var hash = 0;
+  for (final unit in name.codeUnits) {
+    hash = (hash * 31 + unit) & 0x7fffffff;
+  }
+  return kAvatars[hash % kAvatars.length].color;
+}
+
+/// Queue status strip: countdown + filled seats.
+class _QueueStatus extends StatelessWidget {
+  final String phase;
+  final int secondsRemaining;
+  final int waiting;
+
+  const _QueueStatus({
+    required this.phase,
+    required this.secondsRemaining,
+    required this.waiting,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final connecting = phase == 'connecting';
+    final starting = phase == 'playing';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white, width: 1.2),
+        boxShadow: [
+          BoxShadow(
+            color: ArcadeColors.navy.withValues(alpha: 0.12),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          if (connecting || starting)
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                valueColor: AlwaysStoppedAnimation(ArcadeColors.skyDeep),
+                backgroundColor: Color(0x1A0B2A5B),
+              ),
+            )
+          else
+            _CountdownRing(fraction: secondsRemaining / 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              connecting
+                  ? 'CONNECTING TO THE PC…'
+                  : starting
+                  ? 'STARTING YOUR GAME…'
+                  : '$secondsRemaining s  •  $waiting/4 PLAYERS',
+              style: const TextStyle(
+                color: ArcadeColors.navy,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0.6,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Small 3D button for the account/leaderboard row.
+class _MiniButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  final List<Color> faceColors;
+  final Color edgeColor;
+  final Color textColor;
+
+  const _MiniButton(
+    this.label,
+    this.onTap,
+    this.faceColors,
+    this.edgeColor, {
+    this.textColor = Colors.white,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ArcadeButton(
+      onTap: onTap,
+      height: 38,
+      depth: 4,
+      radius: 12,
+      faceColors: faceColors,
+      edgeColor: edgeColor,
+      child: Text(
+        label,
+        style: TextStyle(
+          color: textColor,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+  }
+}
+
+/// One 2v2 seat in the lobby board.
+class _LobbySeat {
+  final String name;
+  final bool you;
+  final bool bot;
+
+  const _LobbySeat({this.name = '', this.you = false, this.bot = false});
+}
+
+/// One-shot fade + rise + slight scale when the lobby opens.
+class _LobbyEntrance extends StatelessWidget {
+  final Widget child;
+
+  const _LobbyEntrance({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 420),
+      curve: Curves.easeOutCubic,
+      child: child,
+      builder: (context, t, child) {
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, 14 * (1 - t)),
+            child: Transform.scale(scale: 0.97 + 0.03 * t, child: child),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Seat slot that pops its card in when a player joins the queue.
+class _SeatSlot extends StatelessWidget {
+  final _LobbySeat seat;
+  final Color color;
+
+  const _SeatSlot({required this.seat, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      switchOutCurve: Curves.easeIn,
+      transitionBuilder: (child, animation) {
+        final scale = Tween<double>(begin: 0.72, end: 1).animate(
+          CurvedAnimation(parent: animation, curve: Curves.easeOutBack),
+        );
+        return FadeTransition(
+          opacity: animation,
+          child: ScaleTransition(scale: scale, child: child),
+        );
+      },
+      child: _SeatCard(
+        key: ValueKey('${seat.name}|${seat.you}|${seat.bot}'),
+        seat: seat,
+        color: color,
+      ),
+    );
+  }
+}
+
+/// 20-second ring that drains smoothly, amber then red near the end.
+class _CountdownRing extends StatelessWidget {
+  final double fraction;
+
+  const _CountdownRing({required this.fraction});
+
+  @override
+  Widget build(BuildContext context) {
+    final f = fraction.clamp(0.0, 1.0);
+    final color = f > 0.45
+        ? ArcadeColors.aquaDeep
+        : f > 0.2
+        ? ArcadeColors.goldDeep
+        : const Color(0xFFD32F2F);
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(end: f),
+      duration: const Duration(milliseconds: 850),
+      curve: Curves.linear,
+      builder: (context, value, _) => SizedBox(
+        width: 26,
+        height: 26,
+        child: CircularProgressIndicator(
+          value: value,
+          strokeWidth: 3.4,
+          backgroundColor: const Color(0x1A0B2A5B),
+          valueColor: AlwaysStoppedAnimation(color),
+        ),
+      ),
+    );
   }
 }

@@ -6,6 +6,15 @@ import 'package:crypto/crypto.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 const int kTargetScore = 100;
+
+const List<Map<String, dynamic>> kMissions = [
+  {'key': 'play3', 'title': 'Play 3 matches', 'subtitle': 'Block, draw or fives', 'target': 3, 'reward': 250},
+  {'key': 'win2', 'title': 'Win 2 matches in a row', 'subtitle': 'Any mode', 'target': 2, 'reward': 400},
+  {'key': 'doubles5', 'title': 'Play 5 doubles', 'subtitle': 'Place a double in any match', 'target': 5, 'reward': 200},
+  {'key': 'score100', 'title': 'Score 100 points', 'subtitle': 'Team score across matches', 'target': 100, 'reward': 350},
+  {'key': 'noPass', 'title': 'Finish a hand without passing', 'subtitle': 'No passes in one hand', 'target': 1, 'reward': 300},
+  {'key': 'inviteFriend', 'title': 'Invite a friend', 'subtitle': 'Share your code once', 'target': 1, 'reward': 500},
+];
 const int kPlayersPerRoom = 4;
 const int kHandSize = 7;
 
@@ -74,6 +83,8 @@ class Room {
   String? lastMessage;
   int? winningTeam;
   bool matchRecorded = false;
+  /// Seat that starts the next hand after a hand-over pause.
+  int handoverStarter = 0;
 
   Room(this.id, List<Client?> seats) : seats = List.of(seats) {
     for (var i = 0; i < seats.length; i++) {
@@ -253,15 +264,23 @@ class Room {
 
   void _award(int team, int points, int starter, String reason) {
     scores[team] += points;
+    lastMessage = '$reason · +$points';
     if (scores[team] >= kTargetScore) {
       status = 'gameover';
       winningTeam = team;
-      lastMessage = 'Team ${team + 1} wins';
       return;
     }
+    // Pause so every client can show the reveal before the next deal.
+    status = 'handover';
+    handoverStarter = starter;
+  }
+
+  /// Deals the next hand after the hand-over pause.
+  void resumeAfterHandover() {
+    if (status != 'handover') return;
+    status = 'playing';
     _deal();
-    turn = starter % 4;
-    lastMessage = '$reason · +$points';
+    turn = handoverStarter % 4;
   }
 
   void broadcast(String type, {String? message}) {
@@ -282,6 +301,10 @@ class Room {
         'board': board.map((p) => p.toJson()).toList(),
         'hand': hands[seat].map((t) => t.toJson()).toList(),
         'counts': [for (final h in hands) h.length],
+        if (status == 'handover' || status == 'gameover')
+          'allHands': [
+            for (final h in hands) h.map((t) => t.toJson()).toList(),
+          ],
         'players': [
           for (var i = 0; i < seats.length; i++)
             {
@@ -300,7 +323,9 @@ class Room {
 class Server {
   final List<Client> queue = [];
   final List<Room> rooms = [];
+  final Map<int, Client> onlineUsers = {};
   final Map<Room, Timer> _botTimers = {};
+  final Map<Room, Timer> _handoverTimers = {};
   int _nextRoom = 1;
   Timer? _matchmakingTimer;
   DateTime? _matchDeadline;
@@ -344,6 +369,38 @@ class Server {
         coins INTEGER NOT NULL DEFAULT 0,
         gems INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+    ''');
+    try {
+      db.execute('ALTER TABLE stats ADD COLUMN win_streak INTEGER NOT NULL DEFAULT 0');
+    } catch (_) {}
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS settings (
+        user_id INTEGER PRIMARY KEY,
+        sound INTEGER NOT NULL DEFAULT 1,
+        music INTEGER NOT NULL DEFAULT 1,
+        vibration INTEGER NOT NULL DEFAULT 1,
+        hints INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS missions (
+        user_id INTEGER NOT NULL,
+        mission_key TEXT NOT NULL,
+        progress INTEGER NOT NULL DEFAULT 0,
+        claimed INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, mission_key)
+      );
+    ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS friends (
+        user_id INTEGER NOT NULL,
+        friend_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, friend_id)
       );
     ''');
     stdout.writeln('Database ready: $path');
@@ -460,6 +517,39 @@ class Server {
         case 'ad_reward':
           _adReward(client, message);
           break;
+        case 'settings_get':
+          _settingsGet(client);
+          break;
+        case 'settings_set':
+          _settingsSet(client, message);
+          break;
+        case 'missions_get':
+          _missionsGet(client);
+          break;
+        case 'mission_update':
+          _missionUpdate(client, message);
+          break;
+        case 'mission_claim':
+          _missionClaim(client, message);
+          break;
+        case 'friends_list':
+          _friendsList(client);
+          break;
+        case 'friend_add':
+          _friendAdd(client, message);
+          break;
+        case 'friend_accept':
+          _friendAccept(client, message);
+          break;
+        case 'friend_remove':
+          _friendRemove(client, message);
+          break;
+        case 'invite_friend':
+          _inviteFriend(client, message);
+          break;
+        case 'profile_get':
+          _profileGet(client);
+          break;
         case 'join':
           _join(client, message);
           break;
@@ -568,6 +658,11 @@ class Server {
         'needed': kPlayersPerRoom,
         'position': i + 1,
         'secondsRemaining': remaining,
+        // Queue order matches the seats the room will use, so the lobby can
+        // show real avatars/names before the match starts.
+        'players': [
+          for (final c in queue) {'name': c.name, 'you': c == queue[i]},
+        ],
       });
     }
   }
@@ -616,9 +711,12 @@ class Server {
     final userId = row['id'] as int;
     db.execute('INSERT OR IGNORE INTO stats(user_id) VALUES (?)', [userId]);
     db.execute('INSERT OR IGNORE INTO wallet(user_id) VALUES (?)', [userId]);
+    db.execute('INSERT OR IGNORE INTO settings(user_id) VALUES (?)', [userId]);
+    _ensureMissionRows(userId);
     client.userId = userId;
     client.name = username;
     client.token = _generateToken();
+    onlineUsers[userId] = client;
     client.send({
       'type': 'auth',
       'ok': true,
@@ -645,6 +743,7 @@ class Server {
     client.userId = userId;
     client.name = username;
     client.token = _generateToken();
+    onlineUsers[userId] = client;
     client.send({
       'type': 'auth',
       'ok': true,
@@ -690,13 +789,14 @@ class Server {
       final won = team == winner;
       final points = room.scores[team];
       db.execute('''
-        INSERT INTO stats(user_id, games_played, wins, losses, total_score)
-        VALUES (?,?,?,?,?)
+        INSERT INTO stats(user_id, games_played, wins, losses, total_score, win_streak)
+        VALUES (?,?,?,?,?,?)
         ON CONFLICT(user_id) DO UPDATE SET
           games_played = games_played + 1,
           wins = wins + ?,
           losses = losses + ?,
-          total_score = total_score + ?
+          total_score = total_score + ?,
+          win_streak = CASE WHEN ? THEN win_streak + 1 ELSE 0 END
       ''', [
         client.userId,
         1,
@@ -704,9 +804,38 @@ class Server {
         won ? 0 : 1,
         points,
         won ? 1 : 0,
+        won ? 1 : 0,
         won ? 0 : 1,
         points,
+        won ? 1 : 0,
       ]);
+      _ensureMissionRows(client.userId!);
+      // play3: +1 per match
+      db.execute(
+        'UPDATE missions SET progress = progress + 1 WHERE user_id=? AND mission_key=?',
+        [client.userId, 'play3'],
+      );
+      // score100: cumulative total score
+      final tsRows = db.select('SELECT total_score FROM stats WHERE user_id=?', [client.userId]);
+      final totalScore = tsRows.isEmpty ? 0 : (tsRows.first['total_score'] as int);
+      db.execute(
+        'UPDATE missions SET progress = ? WHERE user_id=? AND mission_key=?',
+        [totalScore, client.userId, 'score100'],
+      );
+      // win2: streak
+      final streakRows = db.select('SELECT win_streak FROM stats WHERE user_id=?', [client.userId]);
+      final streak = streakRows.isEmpty ? 0 : (streakRows.first['win_streak'] as int);
+      db.execute(
+        'UPDATE missions SET progress = ? WHERE user_id=? AND mission_key=?',
+        [streak, client.userId, 'win2'],
+      );
+      // noPass: complete if no passes this hand
+      if (room.passes == 0) {
+        db.execute(
+          'UPDATE missions SET progress = 1 WHERE user_id=? AND mission_key=?',
+          [client.userId, 'noPass'],
+        );
+      }
     }
   }
 
@@ -741,6 +870,229 @@ class Server {
     _wallet(client);
   }
 
+  void _settingsGet(Client client) {
+    if (client.userId == null) throw 'Login required.';
+    db.execute('INSERT OR IGNORE INTO settings(user_id) VALUES (?)', [client.userId]);
+    final rows = db.select(
+      'SELECT sound, music, vibration, hints FROM settings WHERE user_id = ?',
+      [client.userId],
+    );
+    final r = rows.first;
+    client.send({
+      'type': 'settings',
+      'sound': (r['sound'] as int) == 1,
+      'music': (r['music'] as int) == 1,
+      'vibration': (r['vibration'] as int) == 1,
+      'hints': (r['hints'] as int) == 1,
+    });
+  }
+
+  void _settingsSet(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    db.execute('INSERT OR IGNORE INTO settings(user_id) VALUES (?)', [client.userId]);
+    db.execute(
+      'UPDATE settings SET sound=?, music=?, vibration=?, hints=? WHERE user_id=?',
+      [
+        (message['sound'] == true) ? 1 : 0,
+        (message['music'] == true) ? 1 : 0,
+        (message['vibration'] == true) ? 1 : 0,
+        (message['hints'] == true) ? 1 : 0,
+        client.userId,
+      ],
+    );
+    _settingsGet(client);
+  }
+
+  void _ensureMissionRows(int userId) {
+    for (final m in kMissions) {
+      db.execute(
+        'INSERT OR IGNORE INTO missions(user_id, mission_key, progress, claimed, updated_at) VALUES (?,?,?,?,?)',
+        [userId, m['key'], 0, 0, DateTime.now().toIso8601String()],
+      );
+    }
+  }
+
+  void _missionsGet(Client client) {
+    if (client.userId == null) throw 'Login required.';
+    _ensureMissionRows(client.userId!);
+    final rows = db.select(
+      'SELECT mission_key, progress, claimed FROM missions WHERE user_id = ?',
+      [client.userId],
+    );
+    final byKey = {for (final r in rows) r['mission_key'] as String: r};
+    client.send({
+      'type': 'missions',
+      'missions': kMissions.map((m) {
+        final r = byKey[m['key'] as String];
+        return {
+          'key': m['key'],
+          'title': m['title'],
+          'subtitle': m['subtitle'],
+          'target': m['target'],
+          'reward': m['reward'],
+          'progress': r == null ? 0 : (r['progress'] as int),
+          'claimed': r == null ? false : (r['claimed'] as int) == 1,
+        };
+      }).toList(),
+    });
+  }
+
+  void _missionUpdate(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    final key = message['key'] as String?;
+    final progress = (message['progress'] as num?)?.toInt();
+    if (key == null || progress == null) throw 'Bad mission update.';
+    _ensureMissionRows(client.userId!);
+    db.execute(
+      'UPDATE missions SET progress=?, updated_at=? WHERE user_id=? AND mission_key=?',
+      [progress, DateTime.now().toIso8601String(), client.userId, key],
+    );
+    _missionsGet(client);
+  }
+
+  void _missionClaim(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    final key = message['key'] as String?;
+    if (key == null) throw 'Bad mission.';
+    _ensureMissionRows(client.userId!);
+    final rows = db.select(
+      'SELECT progress, claimed FROM missions WHERE user_id=? AND mission_key=?',
+      [client.userId, key],
+    );
+    if (rows.isEmpty) throw 'Unknown mission.';
+    final r = rows.first;
+    final progress = r['progress'] as int;
+    final claimed = (r['claimed'] as int) == 1;
+    final mission = kMissions.firstWhere((m) => m['key'] == key, orElse: () => {});
+    if (mission.isEmpty) throw 'Unknown mission.';
+    final target = mission['target'] as int;
+    final reward = mission['reward'] as int;
+    if (progress < target) throw 'Mission not complete.';
+    if (claimed) throw 'Already claimed.';
+    db.execute(
+      'UPDATE missions SET claimed=1 WHERE user_id=? AND mission_key=?',
+      [client.userId, key],
+    );
+    db.execute('INSERT OR IGNORE INTO wallet(user_id) VALUES (?)', [client.userId]);
+    db.execute('UPDATE wallet SET coins = coins + ? WHERE user_id = ?', [reward, client.userId]);
+    _wallet(client);
+    _missionsGet(client);
+  }
+
+  void _friendsList(Client client) {
+    if (client.userId == null) throw 'Login required.';
+    final rows = db.select('''
+      SELECT u.id, u.username, f.status
+      FROM friends f JOIN users u ON u.id = f.friend_id
+      WHERE f.user_id = ?
+    ''', [client.userId]);
+    client.send({
+      'type': 'friends',
+      'friends': rows.map((r) => {
+            'id': r['id'],
+            'username': r['username'],
+            'status': r['status'],
+          }).toList(),
+    });
+  }
+
+  void _friendAdd(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    final name = (message['username'] as String?)?.trim() ?? '';
+    if (name.isEmpty) throw 'Username required.';
+    final rows = db.select('SELECT id FROM users WHERE username = ?', [name]);
+    if (rows.isEmpty) throw 'User not found.';
+    final friendId = rows.first['id'] as int;
+    if (friendId == client.userId) throw 'Cannot add yourself.';
+    db.execute(
+      'INSERT OR IGNORE INTO friends(user_id, friend_id, status, created_at) VALUES (?,?,?,?)',
+      [client.userId, friendId, 'pending', DateTime.now().toIso8601String()],
+    );
+    // mirror pending request on the other side as 'incoming'
+    db.execute(
+      'INSERT OR IGNORE INTO friends(user_id, friend_id, status, created_at) VALUES (?,?,?,?)',
+      [friendId, client.userId, 'incoming', DateTime.now().toIso8601String()],
+    );
+    _friendsList(client);
+  }
+
+  void _friendAccept(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    final friendId = (message['friendId'] as num?)?.toInt();
+    if (friendId == null) throw 'Bad request.';
+    db.execute(
+      'UPDATE friends SET status=? WHERE user_id=? AND friend_id=?',
+      ['accepted', client.userId, friendId],
+    );
+    db.execute(
+      'UPDATE friends SET status=? WHERE user_id=? AND friend_id=?',
+      ['accepted', friendId, client.userId],
+    );
+    _friendsList(client);
+  }
+
+  void _friendRemove(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    final friendId = (message['friendId'] as num?)?.toInt();
+    if (friendId == null) throw 'Bad request.';
+    db.execute('DELETE FROM friends WHERE user_id=? AND friend_id=?', [client.userId, friendId]);
+    db.execute('DELETE FROM friends WHERE user_id=? AND friend_id=?', [friendId, client.userId]);
+    _friendsList(client);
+  }
+
+  void _profileGet(Client client) {
+    if (client.userId == null) throw 'Login required.';
+    final rows = db.select('SELECT username, created_at FROM users WHERE id = ?', [client.userId]);
+    if (rows.isEmpty) throw 'User not found.';
+    final u = rows.first;
+    final stats = db.select('SELECT games_played, wins, losses, total_score FROM stats WHERE user_id = ?', [client.userId]);
+    final s = stats.isEmpty ? null : stats.first;
+    _wallet(client);
+    _settingsGet(client);
+    _missionsGet(client);
+    client.send({
+      'type': 'profile',
+      'username': u['username'],
+      'createdAt': u['created_at'],
+      'gamesPlayed': s == null ? 0 : s['games_played'],
+      'wins': s == null ? 0 : s['wins'],
+      'losses': s == null ? 0 : s['losses'],
+      'totalScore': s == null ? 0 : s['total_score'],
+    });
+  }
+
+  void _inviteFriend(Client client, Map<String, dynamic> message) {
+    if (client.userId == null) throw 'Login required.';
+    final friendId = (message['friendId'] as num?)?.toInt();
+    if (friendId == null) throw 'Bad request.';
+    final friend = onlineUsers[friendId];
+    if (friend == null || !friend.alive) throw 'Friend is offline.';
+    _leaveQueue(client);
+    _leaveQueue(friend);
+    final seats = <Client?>[client, friend, null, null];
+    final room = Room(_nextRoom++, seats);
+    rooms.add(room);
+    for (var seat = 0; seat < room.seats.length; seat++) {
+      final c = room.seats[seat];
+      if (c == null) continue;
+      c.send({
+        'type': 'start',
+        'room': room.id,
+        'seat': seat,
+        'players': [
+          for (var i = 0; i < room.seats.length; i++)
+            {
+              'name': room.seats[i]?.name ?? 'Bot ${i + 1}',
+              'seat': i,
+              'team': i % 2,
+              'bot': room.seats[i] == null,
+            },
+        ],
+      });
+    }
+    _publishRoom(room);
+  }
+
   void _play(Client client, Map<String, dynamic> message) {
     final room = client.room;
     if (room == null) throw 'You are not in a game.';
@@ -763,6 +1115,22 @@ class Server {
     final type = room.status == 'gameover' ? 'gameover' : 'state';
     room.broadcast(type);
     _scheduleBotTurn(room);
+    _scheduleHandover(room);
+  }
+
+  /// Holds the table for 5.2s after a hand so clients can run the reveal.
+  void _scheduleHandover(Room room) {
+    if (room.status != 'handover') {
+      _handoverTimers.remove(room)?.cancel();
+      return;
+    }
+    if (_handoverTimers.containsKey(room)) return;
+    _handoverTimers[room] = Timer(const Duration(milliseconds: 5200), () {
+      _handoverTimers.remove(room);
+      if (!rooms.contains(room) || room.status != 'handover') return;
+      room.resumeAfterHandover();
+      _publishRoom(room);
+    });
   }
 
   void _scheduleBotTurn(Room room) {
@@ -789,6 +1157,7 @@ class Server {
     if (room == null) return;
     client.room = null;
     _botTimers.remove(room)?.cancel();
+    _handoverTimers.remove(room)?.cancel();
     for (final other in room.seats) {
       if (other == null || other == client || !other.alive) continue;
       other.send({
@@ -801,6 +1170,7 @@ class Server {
   }
 
   void _onDisconnect(Client client) {
+    if (client.userId != null) onlineUsers.remove(client.userId);
     _leaveQueue(client);
     _leaveRoom(client);
   }
