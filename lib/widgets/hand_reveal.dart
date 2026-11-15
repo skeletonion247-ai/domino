@@ -14,7 +14,7 @@ import '../models/domino_tile.dart';
 class HandReveal {
   HandReveal._();
 
-  static const double durationMs = 4600;
+  static const int durationMs = 6000;
 
   /// [hands] is indexed by seat. [sideOfHand] maps a seat to a table side:
   /// 0 = bottom (you), 1 = left, 2 = top, 3 = right.
@@ -26,7 +26,7 @@ class HandReveal {
     required List<List<DominoTile>> hands,
     int Function(int seat) sideOfHand = _identitySide,
   }) {
-    const scale = 0.4;
+    const scale = 0.5;
     const spriteW = 60.0 * scale;
     const spriteH = 130.0 * scale;
     final specs = <_RevealSpec>[];
@@ -37,19 +37,27 @@ class HandReveal {
       final side = sideOfHand(seat) % 4;
       final n = tiles.length;
       final row = side == 0 || side == 2;
-      final across = row ? 130.0 * scale : 60.0 * scale;
+      // Tiles face their owner: readable from that player's seat.
+      final angle = switch (side) {
+        0 => 0.0,
+        2 => math.pi,
+        1 => math.pi / 2,
+        _ => -math.pi / 2,
+      };
+      // Portrait for top/bottom, landscape for the side seats, so the long
+      // side stays parallel to the player's edge.
+      final along = 60.0 * scale;
+      final perp = 130.0 * scale;
       // The top row keeps clear of the seat avatar on the right.
-      final room = side == 2
-          ? math.max(across, table.width - 96)
-          : row
-          ? math.max(across, table.width - 28)
-          : math.max(across, table.height * 0.68);
+      final room = row
+          ? math.max(along, table.width - (side == 2 ? 96 : 28))
+          : math.max(along, table.height * 0.68);
       final step = n > 1
           ? math.min(
-              across + 2,
-              math.max(across * 0.5, (room - across) / (n - 1)),
+              along + 2,
+              math.max(along * 0.5, (room - along) / (n - 1)),
             )
-          : across + 2;
+          : along + 2;
 
       final Offset anchor;
       switch (side) {
@@ -76,20 +84,26 @@ class HandReveal {
           );
         } else if (side == 2) {
           slot = Offset(
-            table.left + 10 + across / 2 + i * step,
-            table.top + 26,
+            table.left + 10 + along / 2 + i * step,
+            table.top + 4 + perp / 2,
           );
         } else if (side == 1) {
-          slot = Offset(table.left + 18, table.center.dy + t * step);
+          slot = Offset(
+            table.left + 8 + perp / 2,
+            table.center.dy + t * step,
+          );
         } else {
-          slot = Offset(table.right - 18, table.center.dy + t * step);
+          slot = Offset(
+            table.right - 8 - perp / 2,
+            table.center.dy + t * step,
+          );
         }
         specs.add(
           _RevealSpec(
             tile: tiles[i],
             hand: anchor,
             slot: slot,
-            angle: row ? math.pi / 2 : 0,
+            angle: angle,
             delay: i * 14.0,
           ),
         );
@@ -112,7 +126,7 @@ class HandReveal {
 
     final controller = AnimationController(
       vsync: vsync,
-      duration: const Duration(milliseconds: 4600),
+      duration: const Duration(milliseconds: durationMs),
     );
     final entry = OverlayEntry(
       builder: (_) => IgnorePointer(
@@ -157,17 +171,17 @@ class HandReveal {
       opacity = p;
     }
 
-    final gatherStart = 2960 + s.delay;
+    final gatherStart = 4300 + s.delay;
     if (ms >= gatherStart) {
       final p = Curves.easeInOutCubic.transform(
         ((ms - gatherStart) / 700).clamp(0.0, 1.0),
       );
       pos = Offset.lerp(s.slot, s.gather, p)!;
-      angle = s.angle + (math.pi / 2 - s.angle) * p;
+      angle = _lerpAngle(s.angle, math.pi / 2, p);
     }
 
-    const shakeStart = 3300.0;
-    const shakeEnd = 4060.0;
+    const shakeStart = 4500.0;
+    const shakeEnd = 5450.0;
     if (ms >= shakeStart && ms <= shakeEnd) {
       final k = math.sin(
         math.pi * ((ms - shakeStart) / (shakeEnd - shakeStart)).clamp(0.0, 1.0),
@@ -178,13 +192,13 @@ class HandReveal {
       );
     }
 
-    final returnStart = 4010 + s.delay;
+    final returnStart = 5450 + s.delay;
     if (ms >= returnStart) {
       final p = Curves.easeInCubic.transform(
-        ((ms - returnStart) / 470).clamp(0.0, 1.0),
+        ((ms - returnStart) / 450).clamp(0.0, 1.0),
       );
       pos = Offset.lerp(s.gather, s.hand, p)!;
-      angle = math.pi / 2 + (s.angle - math.pi / 2) * p;
+      angle = _lerpAngle(math.pi / 2, s.angle, p);
       opacity = 1 - p;
     }
 
@@ -255,4 +269,16 @@ class _RevealSpec {
     required this.angle,
     required this.delay,
   });
+}
+
+/// Rotates from [a] to [b] the short way round.
+double _lerpAngle(double a, double b, double t) {
+  var delta = b - a;
+  while (delta > math.pi) {
+    delta -= 2 * math.pi;
+  }
+  while (delta < -math.pi) {
+    delta += 2 * math.pi;
+  }
+  return a + delta * t;
 }

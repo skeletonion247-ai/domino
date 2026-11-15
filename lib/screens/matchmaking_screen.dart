@@ -1245,6 +1245,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                         players,
                         counts,
                         Axis.horizontal,
+                        layoutIndex: 2,
                       ),
                     ),
                     Positioned(
@@ -1257,6 +1258,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                           players,
                           counts,
                           Axis.vertical,
+                          layoutIndex: 1,
                         ),
                       ),
                     ),
@@ -1270,6 +1272,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                           players,
                           counts,
                           Axis.vertical,
+                          layoutIndex: 3,
                         ),
                       ),
                     ),
@@ -1372,8 +1375,9 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     int seat,
     List<dynamic> players,
     List<dynamic> counts,
-    Axis direction,
-  ) {
+    Axis direction, {
+    int layoutIndex = -1,
+  }) {
     final data = players[seat] as Map;
     final handCount = (counts[seat] as num).toInt();
     final player = Player(
@@ -1386,6 +1390,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
       builder: (context, progress, _) => OpponentSeat(
         player: player,
         playerIndex: seat,
+        layoutIndex: layoutIndex,
         isCurrentTurn: _turn == seat,
         turnProgress: _turn == seat ? progress : 1,
         direction: direction,

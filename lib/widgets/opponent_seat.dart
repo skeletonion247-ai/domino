@@ -13,6 +13,11 @@ class OpponentSeat extends StatelessWidget {
   final double turnProgress;
   final Axis direction;
 
+  /// On-screen seat (1 = left, 2 = top, 3 = right). Online seats rotate around
+  /// the local player, so [playerIndex] (the server seat) cannot be used for
+  /// layout. Defaults to [playerIndex] for the fixed practice table.
+  final int layoutIndex;
+
   /// Hides the face-down tile fan, e.g. while the end-of-hand reveal shows the
   /// same tiles face-up on the table.
   final bool hideTiles;
@@ -24,8 +29,11 @@ class OpponentSeat extends StatelessWidget {
     this.isCurrentTurn = false,
     this.turnProgress = 1.0,
     this.direction = Axis.horizontal,
+    this.layoutIndex = -1,
     this.hideTiles = false,
   });
+
+  int get _side => layoutIndex < 0 ? playerIndex : layoutIndex;
 
   static const List<Color> _colors = [
     Color(0xFF42A5F5),
@@ -73,12 +81,12 @@ class OpponentSeat extends StatelessWidget {
 
     // Avatars sit clockwise around the table: left seat on top, right seat
     // at the bottom.
-    final avatarDown = playerIndex == 3;
+    final avatarDown = _side == 3;
     return Padding(
       padding: EdgeInsets.zero,
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: playerIndex == 1
+        crossAxisAlignment: _side == 1
             ? CrossAxisAlignment.start
             : CrossAxisAlignment.end,
         children: [
@@ -91,7 +99,7 @@ class OpponentSeat extends StatelessWidget {
           Transform.translate(
             // Hide 70% of the tiles under the side edge (30% visible).
             offset: Offset(
-              (playerIndex == 1 ? -1 : 1) * (130 * _tileScale * 0.7),
+              (_side == 1 ? -1 : 1) * (130 * _tileScale * 0.7),
               0,
             ),
             child: _tileFan(context),

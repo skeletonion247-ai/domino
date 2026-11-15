@@ -1125,7 +1125,7 @@ class Server {
       return;
     }
     if (_handoverTimers.containsKey(room)) return;
-    _handoverTimers[room] = Timer(const Duration(milliseconds: 5200), () {
+    _handoverTimers[room] = Timer(const Duration(milliseconds: 6600), () {
       _handoverTimers.remove(room);
       if (!rooms.contains(room) || room.status != 'handover') return;
       room.resumeAfterHandover();
