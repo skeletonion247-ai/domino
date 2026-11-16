@@ -859,6 +859,23 @@ SnakeLayout computeLayout(
 /// classic 3-tile vertical runs: [top] is the 2nd line above the middle,
 /// [bottom] is the 3rd line below it. A vertical run may only grow on a side
 /// whose row is already laid.
+
+/// Where the layout origin (the centre tile) sits inside [size], clamped so
+/// the whole board stays inside the box.
+///
+/// Anchoring here (instead of centring the bounds) keeps tiles still when one
+/// is added: the board grows around the centre tile instead of jumping half a
+/// tile sideways.
+Offset boardOrigin(Size size, Rect bounds) {
+  var x = size.width / 2;
+  var y = size.height / 2;
+  if (x + bounds.left < 0) x = -bounds.left;
+  if (x + bounds.right > size.width) x = size.width - bounds.right;
+  if (y + bounds.top < 0) y = -bounds.top;
+  if (y + bounds.bottom > size.height) y = size.height - bounds.bottom;
+  return Offset(x, y);
+}
+
 ({bool top, bool bottom}) fullHorizontalRows(
   List<PlacedTile> board, {
   required double maxWidth,
@@ -1188,6 +1205,10 @@ class GameBoard extends StatelessWidget {
           bottomRun: bottomRun,
         );
         final bounds = layout.bounds;
+        final origin = boardOrigin(
+          Size(constraints.maxWidth, constraints.maxHeight),
+          bounds,
+        );
         final scale = layout.scale;
         final seenTileIds = <String, int>{};
         final positionKeys = <Key>[];
@@ -1218,9 +1239,8 @@ class GameBoard extends StatelessWidget {
               _buildAnimatedTile(
                 layout.positions[i],
                 positionKeys[i],
-                bounds,
+                origin,
                 scale,
-                constraints,
                 tileBuilder,
               ),
           ],
@@ -1232,9 +1252,8 @@ class GameBoard extends StatelessWidget {
   Widget _buildAnimatedTile(
     TilePlacement pos,
     Key key,
-    Rect bounds,
+    Offset origin,
     double scale,
-    BoxConstraints constraints,
     Widget Function(
       DominoTile tile, {
       required bool horizontal,
@@ -1247,16 +1266,8 @@ class GameBoard extends StatelessWidget {
       key: key,
       duration: const Duration(milliseconds: 280),
       curve: Curves.easeInOutCubic,
-      left:
-          (constraints.maxWidth - bounds.width) / 2 +
-          pos.offset.dx -
-          bounds.left -
-          (pos.horizontal ? _tileW : _tileH) * scale / 2,
-      top:
-          (constraints.maxHeight - bounds.height) / 2 +
-          pos.offset.dy -
-          bounds.top -
-          (pos.horizontal ? _tileH : _tileW) * scale / 2,
+      left: origin.dx + pos.offset.dx - (pos.horizontal ? _tileW : _tileH) * scale / 2,
+      top: origin.dy + pos.offset.dy - (pos.horizontal ? _tileH : _tileW) * scale / 2,
       width: (pos.horizontal ? _tileW : _tileH) * scale,
       height: (pos.horizontal ? _tileH : _tileW) * scale,
       child:

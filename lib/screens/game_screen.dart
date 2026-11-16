@@ -9,11 +9,16 @@ import '../models/game_state.dart';
 import '../models/player.dart';
 import '../services/audio_service.dart';
 import '../services/practice_session.dart';
+import '../widgets/brick_throw.dart';
+import '../widgets/emote_burst.dart';
+import '../widgets/emote_picker.dart';
 import '../widgets/game_board.dart';
 import '../widgets/hand_over_dialog.dart';
 import '../widgets/hand_reveal.dart';
+import '../widgets/leave_game_dialog.dart';
 import '../widgets/opponent_seat.dart';
 import '../widgets/player_rack.dart';
+import '../widgets/score_fly.dart';
 import '../widgets/score_header.dart';
 import '../widgets/sprite_domino_tile.dart';
 
@@ -34,6 +39,15 @@ class _GameScreenState extends State<GameScreen>
   static const double _turnSeconds = 20;
 
   final GlobalKey _boardKey = GlobalKey();
+  final GlobalKey _team1Key = GlobalKey();
+  final GlobalKey _team2Key = GlobalKey();
+  ScoreFlyRun? _scoreFlyRun;
+  BrickThrowRun? _brickRun;
+  EmoteBurstRun? _emoteBurst;
+  final GlobalKey _rackAvatarKey = GlobalKey();
+  final GlobalKey _topAvatarKey = GlobalKey();
+  int _pendingScoreTeam = -1;
+  int _pendingScorePoints = 0;
   final GlobalKey _rackKey = GlobalKey();
   final GlobalKey _tableKey = GlobalKey();
   late final AnimationController _flyController;
@@ -153,6 +167,22 @@ class _GameScreenState extends State<GameScreen>
     _flyEntry = null;
     _revealRun?.dispose();
     _revealRun = null;
+    // The chips may still be flying: land the points before saving.
+    if (_pendingScoreTeam >= 0) {
+      if (_pendingScoreTeam == 0) {
+        _team1Score += _pendingScorePoints;
+      } else {
+        _team2Score += _pendingScorePoints;
+      }
+      _pendingScoreTeam = -1;
+      _pendingScorePoints = 0;
+    }
+    _scoreFlyRun?.dispose();
+    _scoreFlyRun = null;
+    _brickRun?.dispose();
+    _brickRun = null;
+    _emoteBurst?.dispose();
+    _emoteBurst = null;
     _flyController.dispose();
     super.dispose();
   }
@@ -420,20 +450,13 @@ class _GameScreenState extends State<GameScreen>
       }
     }
 
-    final left =
-        placement.offset.dx -
-        bounds.left -
-        (placement.horizontal ? 130.0 : 60.0) * scale / 2;
-    final top =
-        placement.offset.dy -
-        bounds.top -
-        (placement.horizontal ? 60.0 : 130.0) * scale / 2;
+    final anchor = boardOrigin(size, bounds);
     final w = (placement.horizontal ? 130.0 : 60.0) * scale;
     final h = (placement.horizontal ? 60.0 : 130.0) * scale;
 
     final rect = Rect.fromLTWH(
-      origin.dx + (size.width - bounds.width) / 2 + left,
-      origin.dy + (size.height - bounds.height) / 2 + top,
+      origin.dx + anchor.dx + placement.offset.dx - w / 2,
+      origin.dy + anchor.dy + placement.offset.dy - h / 2,
       w,
       h,
     );
@@ -465,7 +488,7 @@ class _GameScreenState extends State<GameScreen>
     final fromScale = (from.height / (fromHorizontal ? 60 : 130))
         .clamp(0.2, 1.0)
         .toDouble();
-    final toScale = (to.height / (horizontal ? 60 : 130))
+    final toScale = ((to.height / (horizontal ? 60 : 130)) * 0.98)
         .clamp(0.2, 1.0)
         .toDouble();
     final targetTurns = (horizontal ? 1 : 0) + (flipped ? 2 : 0);
@@ -601,13 +624,10 @@ class _GameScreenState extends State<GameScreen>
     final delta = (nextNew.offset - nextEnd.offset) * ratio;
     final center = curEnd.offset + delta;
 
-    final off = Offset(
-      (size.width - cur.bounds.width) / 2,
-      (size.height - cur.bounds.height) / 2,
-    );
+    final anchor = boardOrigin(size, cur.bounds);
     final localCenter = Offset(
-      center.dx - cur.bounds.left + off.dx,
-      center.dy - cur.bounds.top + off.dy,
+      anchor.dx + center.dx,
+      anchor.dy + center.dy,
     );
 
     final horizontal = nextNew.horizontal;
@@ -636,10 +656,23 @@ class _GameScreenState extends State<GameScreen>
     ];
   }
 
-  Widget _endTarget(String side, Rect rect) {
-    const margin = 18.0;
+  /// Converts a board-local rect to the table layer, where the targets live
+  /// so the part hanging over the board edge stays clickable.
+  Rect _tableRect(Rect rect) {
+    final board = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+    final table = _tableKey.currentContext?.findRenderObject() as RenderBox?;
+    if (board == null || table == null) return rect;
+    final delta =
+        board.localToGlobal(Offset.zero) - table.localToGlobal(Offset.zero);
+    return rect.shift(delta);
+  }
+
+  Widget _endTarget(String side, Rect boardRect) {
+    final rect = _tableRect(boardRect);
+    const touch = 16.0; // bigger tap area, the marker itself stays in the slot
+    const inset = 4.0; // keeps the border off the neighbouring tiles
     return Positioned.fromRect(
-      rect: rect.inflate(margin),
+      rect: rect.inflate(touch),
       child: DragTarget<DominoTile>(
         onWillAcceptWithDetails: (details) {
           final ends = _endsFor(details.data);
@@ -652,29 +685,36 @@ class _GameScreenState extends State<GameScreen>
           return GestureDetector(
             onTap: () => _chooseEnd(side),
             child: Padding(
-              padding: const EdgeInsets.all(margin),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 120),
-                decoration: BoxDecoration(
-                  color: hover
-                      ? const Color(0xFFFFD700).withValues(alpha: 0.45)
-                      : const Color(0xFF0A2518).withValues(alpha: 0.55),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: const Color(0xFFFFD700).withValues(alpha: 0.9),
-                    width: 2,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFFFFD700).withValues(alpha: 0.35),
-                      blurRadius: 10,
+              padding: const EdgeInsets.all(touch),
+              child: Padding(
+                padding: const EdgeInsets.all(inset),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 120),
+                  decoration: BoxDecoration(
+                    color: hover
+                        ? const Color(0xFFFFD700).withValues(alpha: 0.35)
+                        : const Color(0xFF0A2518).withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: const Color(0xFFFFD700).withValues(alpha: 0.85),
+                      width: 1.6,
                     ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.add_rounded,
-                  color: Color(0xFFFFD700),
-                  size: 26,
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFFFFD700).withValues(
+                          alpha: hover ? 0.35 : 0.18,
+                        ),
+                        blurRadius: 6,
+                      ),
+                    ],
+                  ),
+                  child: Center(
+                    child: Icon(
+                      Icons.add_rounded,
+                      color: const Color(0xFFFFD700),
+                      size: (rect.shortestSide * 0.45).clamp(14.0, 24.0),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -684,41 +724,52 @@ class _GameScreenState extends State<GameScreen>
     );
   }
 
-  Future<void> _confirmLeave() async {
-    final action = await showDialog<String>(
+  Offset? _centreOf(GlobalKey key) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(box.size.center(Offset.zero));
+  }
+
+  Future<void> _openEmotes() async {
+    final origin = _centreOf(_rackAvatarKey) ?? _rectOf(_rackKey)?.center;
+    if (origin == null) return;
+    final choice = await showEmoteWheel(context, origin: origin);
+    if (!mounted || choice == null) return;
+    if (choice == 'brick') {
+      _throwBrick();
+    } else {
+      final text = choice == 'laugh' ? 'HA HA HA' : 'GG WP';
+      _emoteBurst?.dispose();
+      _emoteBurst = EmoteBurst.play(
+        context: context,
+        vsync: this,
+        at: origin,
+        text: text,
+      );
+    }
+  }
+
+  void _throwBrick() {
+    final rack = _rectOf(_rackKey);
+    final table = _rectOf(_tableKey);
+    if (rack == null || table == null) return;
+    final from =
+        _centreOf(_rackAvatarKey) ?? Offset(rack.left + 28, rack.top + 26);
+    final to =
+        _centreOf(_topAvatarKey) ??
+        _seatRect(2)?.center ??
+        Offset(table.center.dx, table.top + 70);
+    _brickRun?.dispose();
+    _brickRun = BrickThrow.play(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-        ),
-        title: const Text(
-          'LEAVE THE TABLE?',
-          style: TextStyle(
-            color: Color(0xFF0B2A5B),
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-        content: const Text(
-          'Back to menu keeps this game so you can continue it later. '
-          'Quit ends it.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'stay'),
-            child: const Text('STAY'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'menu'),
-            child: const Text('BACK TO MENU'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'quit'),
-            child: const Text('QUIT GAME'),
-          ),
-        ],
-      ),
+      vsync: this,
+      from: from,
+      to: to,
     );
+  }
+
+  Future<void> _confirmLeave() async {
+    final action = await showLeaveGameDialog(context, online: false);
     if (!mounted || action == null || action == 'stay') return;
     if (action == 'quit') {
       _quitting = true;
@@ -921,16 +972,13 @@ class _GameScreenState extends State<GameScreen>
   /// (win card) or deals the next hand.
   void _finishHand(int winningTeam, int points) {
     _botTimer?.cancel();
-    setState(() {
-      _handOver = true;
-      if (winningTeam == 0) {
-        _team1Score += points;
-      } else {
-        _team2Score += points;
-      }
-    });
+    setState(() => _handOver = true);
 
-    final gameOver = _team1Score >= _targetScore || _team2Score >= _targetScore;
+    final projected =
+        (winningTeam == 0 ? _team1Score : _team2Score) + points;
+    final gameOver = projected >= _targetScore;
+    // Chips fly to the winner's counter; the score lands when they arrive.
+    _playScoreFly(winningTeam, points);
     _playReveal(() {
       if (!mounted) return;
       if (gameOver) {
@@ -957,11 +1005,74 @@ class _GameScreenState extends State<GameScreen>
     return box.localToGlobal(Offset.zero) & box.size;
   }
 
+  /// Chips fly from the losing team's seats to the winner's score counter,
+  /// then the points are added.
+  void _playScoreFly(int winningTeam, int points) {
+    final losing = 1 - winningTeam;
+    final from = <Offset>[];
+    for (var i = 0; i < _players.length; i++) {
+      if (_players[i].team != losing) continue;
+      final rect = _seatRect(i);
+      if (rect != null) from.add(rect.center);
+    }
+
+    final key = winningTeam == 0 ? _team1Key : _team2Key;
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    final to = box != null && box.hasSize
+        ? box.localToGlobal(box.size.center(Offset.zero))
+        : const Offset(0, 48);
+
+    void applyScore() {
+      final team = _pendingScoreTeam;
+      if (team < 0) return;
+      final pts = _pendingScorePoints;
+      _pendingScoreTeam = -1;
+      _pendingScorePoints = 0;
+      if (!mounted) return;
+      setState(() {
+        if (team == 0) {
+          _team1Score += pts;
+        } else {
+          _team2Score += pts;
+        }
+      });
+    }
+
+    _pendingScoreTeam = winningTeam;
+    _pendingScorePoints = points;
+
+    _scoreFlyRun?.dispose();
+    _scoreFlyRun = ScoreFly.play(
+      context: context,
+      vsync: this,
+      from: from,
+      to: to,
+      points: points,
+    );
+    if (_scoreFlyRun == null) {
+      applyScore();
+      return;
+    }
+    _scoreFlyRun!.done.whenComplete(() {
+      _scoreFlyRun = null;
+      applyScore();
+    });
+  }
+
   /// End-of-hand reveal: every player's leftover tiles appear face-up on their
   /// own side of the table, gather and shake in the middle, then fly back.
   /// Screen centres of the tiles already on the board, used by the reveal to
   /// sweep all 28 tiles into the middle.
-  List<({Offset center, double scale, bool horizontal})> _boardTileSpecs() {
+  List<
+    ({
+      DominoTile tile,
+      Offset center,
+      double scale,
+      bool horizontal,
+      bool flipped,
+    })
+  >
+  _boardTileSpecs() {
     final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return const [];
     final size = box.size;
@@ -977,18 +1088,17 @@ class _GameScreenState extends State<GameScreen>
     return [
       for (final p in layout.positions)
         (
+          tile: p.tile,
           center:
               origin +
-              Offset(
-                (size.width - layout.bounds.width) / 2 +
-                    p.offset.dx -
-                    layout.bounds.left,
-                (size.height - layout.bounds.height) / 2 +
-                    p.offset.dy -
-                    layout.bounds.top,
-              ),
-          scale: layout.scale,
+              boardOrigin(
+                size,
+                layout.bounds,
+              ) +
+              p.offset,
+          scale: layout.scale * 0.90,
           horizontal: p.horizontal,
+          flipped: p.isFlipped,
         ),
     ];
   }
@@ -1087,6 +1197,8 @@ class _GameScreenState extends State<GameScreen>
                 targetScore: _targetScore,
                 turnFraction: progress,
                 onMenu: _confirmLeave,
+                team1Key: _team1Key,
+                team2Key: _team2Key,
               ),
             ),
             Expanded(
@@ -1131,6 +1243,7 @@ class _GameScreenState extends State<GameScreen>
                           isCurrentTurn: _current == 2,
                           turnProgress: _current == 2 ? progress : 1,
                           hideTiles: _revealing,
+                          avatarKey: _topAvatarKey,
                         ),
                       ),
                     ),
@@ -1196,20 +1309,22 @@ class _GameScreenState extends State<GameScreen>
                                       required bool isFlipped,
                                       required double scale,
                                     }) {
+                                      // A little air keeps the sprite's
+                                      // shadow and side off the neighbour.
                                       return SpriteDominoTile(
                                         tile: tile,
                                         horizontal: horizontal,
                                         isFlipped: isFlipped,
-                                        scale: scale,
+                                        scale: scale * 0.98,
                                       );
                                     },
                               ),
                             ),
-                            ..._buildEndTargets(),
                           ],
                         ),
                       ),
                     ),
+                    ..._buildEndTargets(),
                   ],
                 ),
               ),
@@ -1231,6 +1346,8 @@ class _GameScreenState extends State<GameScreen>
                     setState(() => _dragTile = tile);
                   }
                 },
+                onAvatarTap: _openEmotes,
+                avatarKey: _rackAvatarKey,
               ),
             ),
           ],

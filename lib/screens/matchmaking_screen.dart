@@ -9,11 +9,16 @@ import '../models/domino_tile.dart';
 import '../models/game_state.dart';
 import '../models/player.dart';
 import '../theme/arcade_ui.dart';
+import '../widgets/brick_throw.dart';
+import '../widgets/emote_burst.dart';
+import '../widgets/emote_picker.dart';
 import '../widgets/game_board.dart';
 import '../widgets/hand_over_dialog.dart';
 import '../widgets/hand_reveal.dart';
+import '../widgets/leave_game_dialog.dart';
 import '../widgets/opponent_seat.dart';
 import '../widgets/player_rack.dart';
+import '../widgets/score_fly.dart';
 import '../widgets/score_header.dart';
 import '../widgets/sprite_domino_tile.dart';
 import '../services/ad_service.dart';
@@ -66,6 +71,13 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   final GlobalKey _boardKey = GlobalKey();
   final GlobalKey _tableKey = GlobalKey();
   final GlobalKey _rackKey = GlobalKey();
+  final GlobalKey _team1Key = GlobalKey();
+  final GlobalKey _team2Key = GlobalKey();
+  ScoreFlyRun? _scoreFlyRun;
+  BrickThrowRun? _brickRun;
+  EmoteBurstRun? _emoteBurst;
+  final GlobalKey _rackAvatarKey = GlobalKey();
+  final GlobalKey _topAvatarKey = GlobalKey();
   HandRevealRun? _revealRun;
   bool _revealing = false;
   double _topRun = 3;
@@ -111,6 +123,12 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     _flyEntry = null;
     _revealRun?.dispose();
     _revealRun = null;
+    _scoreFlyRun?.dispose();
+    _scoreFlyRun = null;
+    _brickRun?.dispose();
+    _brickRun = null;
+    _emoteBurst?.dispose();
+    _emoteBurst = null;
     _flyController.dispose();
     _turnProgress.dispose();
     _nameController.dispose();
@@ -227,6 +245,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
           break;
         case 'state':
         case 'gameover':
+          final prevScores = _state?['scores'];
           final incomingBoard = message['board'];
           String? newlyPlaced;
           if (incomingBoard is List &&
@@ -255,6 +274,27 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
           );
           _syncAutoPass();
           _maybeGrowVerticalRuns();
+
+          // Points fly from the losing seats to the winner's counter.
+          final nowScores = message['scores'];
+          final ended = message['status']?.toString() == 'handover' ||
+              message['type'] == 'gameover';
+          if (ended &&
+              prevScores is List &&
+              nowScores is List &&
+              prevScores.length >= 2 &&
+              nowScores.length >= 2) {
+            final d0 =
+                (nowScores[0] as num).toInt() -
+                (prevScores[0] as num).toInt();
+            final d1 =
+                (nowScores[1] as num).toInt() -
+                (prevScores[1] as num).toInt();
+            if (d0 > 0 || d1 > 0) {
+              final winner = d0 >= d1 ? 0 : 1;
+              _playScoreFly(winner, d0 >= d1 ? d0 : d1);
+            }
+          }
           if (message['status']?.toString() == 'handover') {
             final hands = _parseHands(message['allHands']);
             if (hands != null) _playRevealHands(hands);
@@ -273,6 +313,13 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
               _recordOnlineResult(message);
               _showResultDialog(message);
             }
+          }
+          break;
+        case 'emote':
+          final emoteSeat = (message['seat'] as num?)?.toInt();
+          final emote = message['emote']?.toString();
+          if (emoteSeat != null && emote != null && emoteSeat != _seat) {
+            _playRemoteEmote(emote, emoteSeat);
           }
           break;
         case 'auth':
@@ -437,7 +484,16 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   }
 
   /// Screen centres of the tiles already on the board, used by the reveal.
-  List<({Offset center, double scale, bool horizontal})> _boardTileSpecs() {
+  List<
+    ({
+      DominoTile tile,
+      Offset center,
+      double scale,
+      bool horizontal,
+      bool flipped,
+    })
+  >
+  _boardTileSpecs() {
     final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return const [];
     final size = box.size;
@@ -455,18 +511,17 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     return [
       for (final p in layout.positions)
         (
+          tile: p.tile,
           center:
               origin +
-              Offset(
-                (size.width - layout.bounds.width) / 2 +
-                    p.offset.dx -
-                    layout.bounds.left,
-                (size.height - layout.bounds.height) / 2 +
-                    p.offset.dy -
-                    layout.bounds.top,
-              ),
-          scale: layout.scale,
+              boardOrigin(
+                size,
+                layout.bounds,
+              ) +
+              p.offset,
+          scale: layout.scale * 0.90,
           horizontal: p.horizontal,
+          flipped: p.isFlipped,
         ),
     ];
   }
@@ -510,6 +565,41 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     final box = key.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return null;
     return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  /// Chips fly from the losing team's seats to the winner's score counter.
+  void _playScoreFly(int winningTeam, int points) {
+    final table = _rectOf(_tableKey);
+    if (table == null) return;
+    final rack = _rectOf(_rackKey);
+    final losing = 1 - winningTeam;
+    final mySeat = _seat < 0 ? 0 : _seat;
+    final from = <Offset>[];
+    for (var s = 0; s < 4; s++) {
+      if (s % 2 != losing) continue;
+      final side = ((s - mySeat) % 4 + 4) % 4;
+      from.add(switch (side) {
+        0 => rack?.center ?? Offset(table.center.dx, table.bottom - 14),
+        2 => Offset(table.center.dx, table.top + 34),
+        1 => Offset(table.left + 30, table.center.dy),
+        _ => Offset(table.right - 30, table.center.dy),
+      });
+    }
+
+    final key = winningTeam == 0 ? _team1Key : _team2Key;
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    final to = box != null && box.hasSize
+        ? box.localToGlobal(box.size.center(Offset.zero))
+        : const Offset(0, 48);
+
+    _scoreFlyRun?.dispose();
+    _scoreFlyRun = ScoreFly.play(
+      context: context,
+      vsync: this,
+      from: from,
+      to: to,
+      points: points,
+    );
   }
 
   /// Plays the shared end-of-hand reveal. Seats are mapped to the local view:
@@ -641,45 +731,94 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     });
   }
 
+  Offset? _centreOf(GlobalKey key) {
+    final box = key.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(box.size.center(Offset.zero));
+  }
+
+  Offset _sidePoint(int side, Rect table, Rect? rack) {
+    switch (side) {
+      case 0:
+        return rack?.center ?? Offset(table.center.dx, table.bottom - 14);
+      case 2:
+        return Offset(table.center.dx, table.top + 44);
+      case 1:
+        return Offset(table.left + 28, table.center.dy);
+      default:
+        return Offset(table.right - 28, table.center.dy);
+    }
+  }
+
+  void _playRemoteEmote(String emote, int seat) {
+    final table = _rectOf(_tableKey);
+    if (table == null) return;
+    final rack = _rectOf(_rackKey);
+    final my = _seat < 0 ? 0 : _seat;
+    final side = ((seat - my) % 4 + 4) % 4;
+    final from = _sidePoint(side, table, rack);
+    final to = _sidePoint((side + 2) % 4, table, rack);
+    if (emote == 'brick') {
+      _brickRun?.dispose();
+      _brickRun = BrickThrow.play(
+        context: context,
+        vsync: this,
+        from: from,
+        to: to,
+      );
+    } else {
+      _playBurst(emote == 'laugh' ? 'HA HA HA' : 'GG WP', from);
+    }
+  }
+
+  Future<void> _openEmotes() async {
+    final origin = _centreOf(_rackAvatarKey) ?? _rectOf(_rackKey)?.center;
+    if (origin == null) return;
+    final choice = await showEmoteWheel(context, origin: origin);
+    if (!mounted || choice == null) return;
+    if (choice == 'brick') {
+      _throwBrick();
+    } else {
+      final text = choice == 'laugh' ? 'HA HA HA' : 'GG WP';
+      _playBurst(text, origin);
+      _send({'type': 'emote', 'emote': choice});
+    }
+  }
+
+  void _playBurst(String text, Offset at) {
+    _emoteBurst?.dispose();
+    _emoteBurst = EmoteBurst.play(
+      context: context,
+      vsync: this,
+      at: at,
+      text: text,
+    );
+  }
+
+  void _throwBrick() {
+    final rack = _rectOf(_rackKey);
+    final table = _rectOf(_tableKey);
+    if (rack == null || table == null) return;
+    final from =
+        _centreOf(_rackAvatarKey) ?? Offset(rack.left + 28, rack.top + 26);
+    final to =
+        _centreOf(_topAvatarKey) ?? Offset(table.center.dx, table.top + 60);
+    _brickRun?.dispose();
+    _brickRun = BrickThrow.play(
+      context: context,
+      vsync: this,
+      from: from,
+      to: to,
+    );
+    _send({'type': 'emote', 'emote': 'brick'});
+  }
+
   Future<void> _confirmLeave() async {
     if (_state == null) {
       _leave();
       return;
     }
-    final action = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-        ),
-        title: const Text(
-          'LEAVE THE TABLE?',
-          style: TextStyle(
-            color: ArcadeColors.navy,
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-        content: const Text(
-          'Back to menu keeps the game running and you can rejoin from '
-          'online. Quit gives your seat to a bot.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'stay'),
-            child: const Text('STAY'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'menu'),
-            child: const Text('BACK TO MENU'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'quit'),
-            child: const Text('QUIT GAME'),
-          ),
-        ],
-      ),
-    );
+    final action = await showLeaveGameDialog(context, online: true);
     if (!mounted || action == null || action == 'stay') return;
     if (action == 'quit') {
       _send({'type': 'quit'});
@@ -777,25 +916,92 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     final scale = layout.scale;
     final w = (placement.horizontal ? 130.0 : 60.0) * scale;
     final h = (placement.horizontal ? 60.0 : 130.0) * scale;
-    final left =
-        (size.width - bounds.width) / 2 +
-        placement.offset.dx -
-        bounds.left -
-        w / 2;
-    final top =
-        (size.height - bounds.height) / 2 +
-        placement.offset.dy -
-        bounds.top -
-        h / 2;
+    final anchor = boardOrigin(size, bounds);
     return (
-      rect: Rect.fromLTWH(origin.dx + left, origin.dy + top, w, h),
+      rect: Rect.fromLTWH(
+        origin.dx + anchor.dx + placement.offset.dx - w / 2,
+        origin.dy + anchor.dy + placement.offset.dy - h / 2,
+        w,
+        h,
+      ),
       horizontal: placement.horizontal,
       flipped: placement.isFlipped,
     );
   }
 
-  Rect? _targetRect(DominoTile tile, String side) =>
-      _placementFor(tile, side, local: true)?.rect;
+  Rect? _targetRect(DominoTile tile, String side) => _previewRectFor(tile, side);
+
+  /// Where the tile goes, drawn against the board as it is right now (the
+  /// board re-centres when the tile is placed, so the raw placement slot
+  /// would overlap the tile it attaches to).
+  Rect? _previewRectFor(DominoTile tile, String side) {
+    final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    final size = box.size;
+
+    final connected = side == 'left' ? _left : _right;
+    final sim = [..._board, PlacedTile(tile, side, connected)];
+
+    final cur = computeLayout(
+      _board,
+      maxWidth: size.width,
+      maxHeight: size.height,
+      smart: true,
+      topRun: _topRun,
+      bottomRun: _bottomRun,
+    );
+    final next = computeLayout(
+      sim,
+      maxWidth: size.width,
+      maxHeight: size.height,
+      smart: true,
+      topRun: _topRun,
+      bottomRun: _bottomRun,
+    );
+
+    // The tile the new one attaches to: the last tile on that side, or the
+    // centre tile when the side is still empty.
+    var end = _board.first;
+    for (final p in _board) {
+      if (p.side == side) end = p;
+    }
+
+    TilePlacement? curEnd;
+    for (final p in cur.positions) {
+      if (p.tile.top == end.tile.top && p.tile.bottom == end.tile.bottom) {
+        curEnd = p;
+        break;
+      }
+    }
+    TilePlacement? nextEnd;
+    TilePlacement? nextNew;
+    for (final p in next.positions) {
+      if (p.tile.top == end.tile.top && p.tile.bottom == end.tile.bottom) {
+        nextEnd = p;
+      }
+      if (p.tile.top == tile.top && p.tile.bottom == tile.bottom) {
+        nextNew = p;
+      }
+    }
+    if (curEnd == null || nextEnd == null || nextNew == null) {
+      return _placementFor(tile, side, local: true)?.rect;
+    }
+
+    final ratio = cur.scale / next.scale;
+    final delta = (nextNew.offset - nextEnd.offset) * ratio;
+    final center = curEnd.offset + delta;
+
+    final anchor = boardOrigin(size, cur.bounds);
+    final localCenter = Offset(
+      anchor.dx + center.dx,
+      anchor.dy + center.dy,
+    );
+
+    final horizontal = nextNew.horizontal;
+    final w = (horizontal ? 130.0 : 60.0) * cur.scale;
+    final h = (horizontal ? 60.0 : 130.0) * cur.scale;
+    return Rect.fromCenter(center: localCenter, width: w, height: h);
+  }
 
   void _flyTile(
     DominoTile tile,
@@ -808,7 +1014,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     final flipped = target.flipped;
     final to = target.rect;
     final fromScale = (from.height / 130).clamp(0.2, 1.0).toDouble();
-    final toScale = (to.height / (horizontal ? 60 : 130))
+    final toScale = ((to.height / (horizontal ? 60 : 130)) * 0.98)
         .clamp(0.2, 1.0)
         .toDouble();
     final targetTurns = (horizontal ? 1 : 0) + (flipped ? 2 : 0);
@@ -882,10 +1088,23 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     ];
   }
 
-  Widget _endTarget(DominoTile tile, String side, Rect rect) {
-    const margin = 18.0;
+  /// Converts a board-local rect to the table layer, where the targets live
+  /// so the part hanging over the board edge stays clickable.
+  Rect _tableRect(Rect rect) {
+    final board = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+    final table = _tableKey.currentContext?.findRenderObject() as RenderBox?;
+    if (board == null || table == null) return rect;
+    final delta =
+        board.localToGlobal(Offset.zero) - table.localToGlobal(Offset.zero);
+    return rect.shift(delta);
+  }
+
+  Widget _endTarget(DominoTile tile, String side, Rect boardRect) {
+    final rect = _tableRect(boardRect);
+    const touch = 16.0; // bigger tap area, the marker itself stays in the slot
+    const inset = 4.0; // keeps the border off the neighbouring tiles
     return Positioned.fromRect(
-      rect: rect.inflate(margin),
+      rect: rect.inflate(touch),
       child: DragTarget<DominoTile>(
         onWillAcceptWithDetails: (details) => _fitsEnd(details.data, side),
         onAcceptWithDetails: (details) => _play(
@@ -898,29 +1117,36 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
           return GestureDetector(
             onTap: () => _play(tile, side, fromRect: _selectedFromRect),
             child: Padding(
-              padding: const EdgeInsets.all(margin),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 120),
-                decoration: BoxDecoration(
-                  color: hover
-                      ? const Color(0xFFFFD700).withValues(alpha: 0.45)
-                      : const Color(0xFF0A2518).withValues(alpha: 0.55),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: const Color(0xFFFFD700).withValues(alpha: 0.9),
-                    width: 2,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFFFFD700).withValues(alpha: 0.35),
-                      blurRadius: 10,
+              padding: const EdgeInsets.all(touch),
+              child: Padding(
+                padding: const EdgeInsets.all(inset),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 120),
+                  decoration: BoxDecoration(
+                    color: hover
+                        ? const Color(0xFFFFD700).withValues(alpha: 0.35)
+                        : const Color(0xFF0A2518).withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: const Color(0xFFFFD700).withValues(alpha: 0.85),
+                      width: 1.6,
                     ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.add_rounded,
-                  color: Color(0xFFFFD700),
-                  size: 26,
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFFFFD700).withValues(
+                          alpha: hover ? 0.35 : 0.18,
+                        ),
+                        blurRadius: 6,
+                      ),
+                    ],
+                  ),
+                  child: Center(
+                    child: Icon(
+                      Icons.add_rounded,
+                      color: const Color(0xFFFFD700),
+                      size: (rect.shortestSide * 0.45).clamp(14.0, 24.0),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -1273,6 +1499,8 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                 targetScore: 100,
                 turnFraction: progress,
                 onMenu: _confirmLeave,
+                team1Key: _team1Key,
+                team2Key: _team2Key,
               ),
             ),
             Expanded(
@@ -1318,6 +1546,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                         counts,
                         Axis.horizontal,
                         layoutIndex: 2,
+                        avatarKey: _topAvatarKey,
                       ),
                     ),
                     Positioned(
@@ -1371,20 +1600,22 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                                     required bool isFlipped,
                                     required double scale,
                                   }) {
+                                    // A little air keeps the sprite's
+                                    // shadow and side off the neighbour.
                                     return SpriteDominoTile(
                                       tile: tile,
                                       horizontal: horizontal,
                                       isFlipped: isFlipped,
-                                      scale: scale,
+                                      scale: scale * 0.98,
                                     );
                                   },
                             ),
                           ),
-                          ..._endTargets(),
                         ],
                       ),
                     ),
                   ),
+                  ..._endTargets(),
                 ],
                 ),
               ),
@@ -1406,6 +1637,8 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                     setState(() => _dragTile = tile);
                   }
                 },
+                onAvatarTap: _openEmotes,
+                avatarKey: _rackAvatarKey,
               ),
             ),
           ],
@@ -1420,6 +1653,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     List<dynamic> counts,
     Axis direction, {
     int layoutIndex = -1,
+    Key? avatarKey,
   }) {
     final data = players[seat] as Map;
     final handCount = (counts[seat] as num).toInt();
@@ -1438,6 +1672,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
         turnProgress: _turn == seat ? progress : 1,
         direction: direction,
         hideTiles: _revealing,
+        avatarKey: avatarKey,
       ),
     );
   }

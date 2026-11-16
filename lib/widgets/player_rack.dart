@@ -14,6 +14,12 @@ class PlayerRack extends StatelessWidget {
   final void Function(int oldIndex, int newIndex) onReorder;
   final ValueChanged<DominoTile?>? onPlayDragChanged;
 
+  /// Opens the emote picker.
+  final VoidCallback? onAvatarTap;
+
+  /// Key for the avatar circle (emotes launch from it).
+  final Key? avatarKey;
+
   /// Hides the tiles but keeps the tray, e.g. while the end-of-hand reveal
   /// shows them face-up on the table.
   final bool hideTiles;
@@ -29,6 +35,8 @@ class PlayerRack extends StatelessWidget {
     required this.onReorder,
     this.onPlayDragChanged,
     this.hideTiles = false,
+    this.onAvatarTap,
+    this.avatarKey,
   });
 
   @override
@@ -89,11 +97,15 @@ class PlayerRack extends StatelessWidget {
           ),
           Positioned(
             left: 6,
-            top: -32,
-            child: SizedBox(
-              width: 44,
-              height: 44,
-              child: Stack(
+            top: 4,
+            child: GestureDetector(
+              key: avatarKey,
+              behavior: HitTestBehavior.opaque,
+              onTap: onAvatarTap,
+              child: SizedBox(
+                width: 44,
+                height: 44,
+                child: Stack(
                 alignment: Alignment.center,
                 children: [
                   if (isMyTurn)
@@ -140,7 +152,8 @@ class PlayerRack extends StatelessWidget {
                       ),
                     ),
                   ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -259,13 +272,15 @@ class _SmoothHandState extends State<_SmoothHand> {
     final to = _targetIndex;
     final dropped = _droppedInHand;
     _droppedInHand = false;
+    // Reorder first so the tiles glide straight to their new slots; clearing
+    // the drag state first made them snap back for one frame.
+    if (dropped && from != null && to != null && from != to) {
+      widget.onReorder(from, to);
+    }
     setState(() {
       _dragIndex = null;
       _targetIndex = null;
     });
-    if (dropped && from != null && to != null && from != to) {
-      widget.onReorder(from, to);
-    }
   }
 
   Widget _buildTile(

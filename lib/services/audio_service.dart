@@ -48,4 +48,18 @@ class AudioService {
       await _sfx.play(AssetSource('audio/click.wav'));
     } catch (_) {}
   }
+
+  Future<void> playWhoosh() async {
+    if (!PlayerProfile.instance.sound) return;
+    try {
+      await _sfx.play(AssetSource('audio/whoosh.wav'));
+    } catch (_) {}
+  }
+
+  Future<void> playTonk() async {
+    if (!PlayerProfile.instance.sound) return;
+    try {
+      await _sfx.play(AssetSource('audio/tonk.wav'));
+    } catch (_) {}
+  }
 }

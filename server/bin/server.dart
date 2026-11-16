@@ -85,8 +85,10 @@ class Room {
   String? lastMessage;
   int? winningTeam;
   bool matchRecorded = false;
-  /// Seat that starts the next hand after a hand-over pause.
-  int handoverStarter = 0;
+  /// Set when the previous hand was won outright: that seat starts the next
+  /// hand and may open with any tile.
+  int? nextStarter;
+  bool freeOpening = false;
 
   Room(this.id, List<Client?> seats) : seats = List.of(seats) {
     for (var i = 0; i < seats.length; i++) {
@@ -110,6 +112,8 @@ class Room {
   }
 
   void _deal() {
+    freeOpening = false;
+    nextStarter = null;
     final tiles = _set();
     for (var i = 0; i < 4; i++) {
       hands[i] = tiles.sublist(i * kHandSize, (i + 1) * kHandSize);
@@ -154,7 +158,7 @@ class Room {
     if (index < 0) throw 'That tile is not in your hand.';
     // Block dominoes: the match opens with the highest double in the
     // starter's hand (the dealer already picks that player to start).
-    if (boardEmpty) {
+    if (boardEmpty && !freeOpening) {
       final highest = hands[seat]
           .where((t) => t.isDouble)
           .fold<int>(-1, (best, t) => t.a > best ? t.a : best);
@@ -234,6 +238,7 @@ class Room {
   }
 
   void _endHand(int winnerSeat) {
+    nextStarter = winnerSeat;
     final team = winnerSeat % 2;
     var points = 0;
     for (var i = 0; i < 4; i++) {
@@ -241,10 +246,11 @@ class Room {
         points += hands[i].fold<int>(0, (sum, t) => sum + t.pips);
       }
     }
-    _award(team, points, winnerSeat, 'Player ${winnerSeat + 1} finished');
+    _award(team, points, 'Player ${winnerSeat + 1} finished');
   }
 
   void _blocked() {
+    nextStarter = null;
     var bestSeat = 0;
     var bestScore = 1 << 30;
     for (var i = 0; i < 4; i++) {
@@ -261,10 +267,10 @@ class Room {
         points += hands[i].fold<int>(0, (sum, t) => sum + t.pips);
       }
     }
-    _award(team, points, bestSeat, 'Blocked');
+    _award(team, points, 'Blocked');
   }
 
-  void _award(int team, int points, int starter, String reason) {
+  void _award(int team, int points, String reason) {
     scores[team] += points;
     lastMessage = '$reason · +$points';
     if (scores[team] >= kTargetScore) {
@@ -274,15 +280,27 @@ class Room {
     }
     // Pause so every client can show the reveal before the next deal.
     status = 'handover';
-    handoverStarter = starter;
   }
 
-  /// Deals the next hand after the hand-over pause.
+  /// Deals the next hand after the hand-over pause. [_deal] picks the owner
+  /// of the highest double to start, as the opening rule requires.
   void resumeAfterHandover() {
     if (status != 'handover') return;
+    final starter = nextStarter;
     status = 'playing';
     _deal();
-    turn = handoverStarter % 4;
+    if (starter != null) {
+      turn = starter % 4;
+      freeOpening = true;
+    }
+  }
+
+  /// Sends an emote from [seat] to everyone at the table.
+  void broadcastEmote(int seat, String emote) {
+    for (final client in seats) {
+      if (client == null || !client.alive) continue;
+      client.send({'type': 'emote', 'seat': seat, 'emote': emote});
+    }
   }
 
   void broadcast(String type, {String? message}) {
@@ -569,6 +587,9 @@ class Server {
         case 'leave':
         case 'quit':
           _detachFromRoom(client, permanent: true);
+          break;
+        case 'emote':
+          _emote(client, message);
           break;
         default:
           client.sendError('Unknown message type.');
@@ -1157,6 +1178,15 @@ class Server {
     final tile = Tile(rawTile[0] as int, rawTile[1] as int);
     room.play(client.seat!, tile, (message['side'] as String?) ?? 'right');
     _publishRoom(room);
+  }
+
+  void _emote(Client client, Map<String, dynamic> message) {
+    final room = client.room;
+    final seat = client.seat;
+    if (room == null || seat == null) return;
+    final emote = (message['emote'] as String?)?.trim();
+    if (emote == null || emote.isEmpty) return;
+    room.broadcastEmote(seat, emote);
   }
 
   void _pass(Client client) {

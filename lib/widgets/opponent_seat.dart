@@ -18,6 +18,9 @@ class OpponentSeat extends StatelessWidget {
   /// layout. Defaults to [playerIndex] for the fixed practice table.
   final int layoutIndex;
 
+  /// Key for the avatar circle (emotes aim at it).
+  final Key? avatarKey;
+
   /// Hides the face-down tile fan, e.g. while the end-of-hand reveal shows the
   /// same tiles face-up on the table.
   final bool hideTiles;
@@ -31,6 +34,7 @@ class OpponentSeat extends StatelessWidget {
     this.direction = Axis.horizontal,
     this.layoutIndex = -1,
     this.hideTiles = false,
+    this.avatarKey,
   });
 
   int get _side => layoutIndex < 0 ? playerIndex : layoutIndex;
@@ -69,7 +73,7 @@ class OpponentSeat extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                _avatar(color),
+                _avatarSlot(color),
                 const SizedBox(height: 3),
                 _namePlate(color),
               ],
@@ -94,7 +98,7 @@ class OpponentSeat extends StatelessWidget {
             : CrossAxisAlignment.end,
         children: [
           if (!avatarDown) ...[
-            _avatar(color),
+            _avatarSlot(color),
             const SizedBox(height: 4),
             _namePlate(color),
           ],
@@ -118,7 +122,7 @@ class OpponentSeat extends StatelessWidget {
           ),
           if (avatarDown) ...[
             const SizedBox(height: 4),
-            _avatar(color),
+            _avatarSlot(color),
             const SizedBox(height: 4),
             _namePlate(color),
           ],
@@ -126,6 +130,9 @@ class OpponentSeat extends StatelessWidget {
       ),
     );
   }
+
+  Widget _avatarSlot(Color color) =>
+      KeyedSubtree(key: avatarKey, child: _avatar(color));
 
   Widget _avatar(Color color) {
     final avatar = Container(

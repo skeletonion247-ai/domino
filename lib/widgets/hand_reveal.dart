@@ -16,9 +16,12 @@ class HandReveal {
 
   static const int durationMs = 8000;
 
-  static const double _holdUntilMs = 3000;
-  static const double _gatherMs = 800;
-  static const double _shakeStartMs = 3800;
+  /// Face-up hold, then the flip, the gather, the shake and the deal.
+  static const double _holdUntilMs = 2900;
+  static const double _flipMs = 280;
+  static const double _gatherStartMs = 3150;
+  static const double _gatherMs = 850;
+  static const double _shakeStartMs = 3950;
   static const double _shakeEndMs = 6300;
   static const double _dealMs = 900;
   static const double _tileScale = 0.5;
@@ -32,8 +35,16 @@ class HandReveal {
     required Rect table,
     required Rect? rack,
     required List<List<DominoTile>> hands,
-    List<({Offset center, double scale, bool horizontal})> boardTiles =
-        const [],
+    List<
+      ({
+        DominoTile tile,
+        Offset center,
+        double scale,
+        bool horizontal,
+        bool flipped,
+      })
+    >
+    boardTiles = const [],
     int Function(int seat) sideOfHand = _identitySide,
   }) {
     final specs = <_RevealSpec>[];
@@ -81,9 +92,11 @@ class HandReveal {
         }
         specs.add(
           _RevealSpec(
+            tile: tiles[i],
             slot: slot,
             startScale: _tileScale,
             startAngle: angle,
+            faceAngle: angle,
             delay: (index % 7) * 12.0,
           ),
         );
@@ -94,11 +107,14 @@ class HandReveal {
     // Tiles already on the board. The caller hides the board while this runs,
     // so these backs take its place exactly.
     for (final tile in boardTiles) {
+      final base = tile.horizontal ? math.pi / 2 : 0.0;
       specs.add(
         _RevealSpec(
+          tile: tile.tile,
           slot: tile.center,
           startScale: tile.scale,
-          startAngle: tile.horizontal ? math.pi / 2 : 0,
+          startAngle: base,
+          faceAngle: base + (tile.flipped ? math.pi : 0),
           delay: (index % 7) * 12.0,
         ),
       );
@@ -170,7 +186,12 @@ class HandReveal {
     final appear = (ms - s.delay) / 300;
     if (appear < 1) opacity = appear.clamp(0.0, 1.0);
 
-    final gatherStart = _holdUntilMs + s.delay;
+    // Everyone sees the faces first, then the tiles flip face-down.
+    final flip = ((ms - (_holdUntilMs + s.delay)) / _flipMs).clamp(0.0, 1.0);
+    final showBack = flip >= 0.5;
+    final flipX = math.cos(math.pi * flip).abs();
+
+    final gatherStart = _gatherStartMs + s.delay;
     if (ms >= gatherStart) {
       final p = Curves.easeInOutCubic.transform(
         ((ms - gatherStart) / _gatherMs).clamp(0.0, 1.0),
@@ -206,6 +227,7 @@ class HandReveal {
 
     final w = 60.0 * scale;
     final h = 130.0 * scale;
+    final asset = showBack ? 'assets/tiles/t1back.png' : _faceAsset(s.tile);
     return Positioned(
       left: pos.dx - w / 2,
       top: pos.dy - h / 2,
@@ -214,16 +236,26 @@ class HandReveal {
       child: Opacity(
         opacity: opacity.clamp(0.0, 1.0),
         child: Transform.rotate(
-          angle: angle,
-          child: Image.asset(
-            'assets/tiles/t1back.png',
-            width: w,
-            height: h,
-            fit: BoxFit.fill,
+          angle: showBack ? angle : s.faceAngle,
+          child: Transform(
+            alignment: Alignment.center,
+            transform: Matrix4.identity()..scale(flipX, 1.0),
+            child: Image.asset(
+              asset,
+              width: w,
+              height: h,
+              fit: BoxFit.fill,
+            ),
           ),
         ),
       ),
     );
+  }
+
+  static String _faceAsset(DominoTile t) {
+    final hi = math.max(t.top, t.bottom);
+    final lo = math.min(t.top, t.bottom);
+    return 'assets/tiles/t1d$hi$lo.png';
   }
 }
 
@@ -253,18 +285,22 @@ class HandRevealRun {
 }
 
 class _RevealSpec {
+  final DominoTile tile;
   final Offset slot;
   final double startScale;
   final double startAngle;
+  final double faceAngle;
   final double delay;
   late Offset gather;
   late Offset dealAnchor;
   late double dealAngle;
 
   _RevealSpec({
+    required this.tile,
     required this.slot,
     required this.startScale,
     required this.startAngle,
+    required this.faceAngle,
     required this.delay,
   });
 }

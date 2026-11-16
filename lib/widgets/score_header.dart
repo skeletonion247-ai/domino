@@ -13,6 +13,10 @@ class ScoreHeader extends StatelessWidget {
   final String team2Name;
   final VoidCallback? onMenu;
 
+  /// Where the end-of-hand points fly to.
+  final Key? team1Key;
+  final Key? team2Key;
+
   const ScoreHeader({
     super.key,
     required this.team1Score,
@@ -22,6 +26,8 @@ class ScoreHeader extends StatelessWidget {
     this.team1Name = 'TEAM 1',
     this.team2Name = 'TEAM 2',
     this.onMenu,
+    this.team1Key,
+    this.team2Key,
   });
 
   static const _team1 = ArcadeColors.aqua;
@@ -55,24 +61,30 @@ class ScoreHeader extends StatelessWidget {
                   Positioned(
                     left: 14,
                     top: 6,
-                    child: _teamBlock(
-                      team1Name,
-                      team1Score,
-                      _team1,
-                      _team1Deep,
-                      leading: leader == 1,
+                    child: KeyedSubtree(
+                      key: team1Key,
+                      child: _teamBlock(
+                        team1Name,
+                        team1Score,
+                        _team1,
+                        _team1Deep,
+                        leading: leader == 1,
+                      ),
                     ),
                   ),
                   Positioned(
                     right: 46,
                     top: 6,
-                    child: _teamBlock(
-                      team2Name,
-                      team2Score,
-                      _team2,
-                      _team2Deep,
-                      leading: leader == 2,
-                      alignRight: true,
+                    child: KeyedSubtree(
+                      key: team2Key,
+                      child: _teamBlock(
+                        team2Name,
+                        team2Score,
+                        _team2,
+                        _team2Deep,
+                        leading: leader == 2,
+                        alignRight: true,
+                      ),
                     ),
                   ),
                   Positioned(
