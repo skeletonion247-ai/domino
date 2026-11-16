@@ -45,6 +45,11 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   List<Map<String, dynamic>> _leaderboardEntries = [];
   int _coins = 0;
   int _gems = 0;
+  /// Stable id for this app session, so the server can put us back in a game
+  /// we left without quitting.
+  static final String _clientId =
+      'c${DateTime.now().microsecondsSinceEpoch}${math.Random().nextInt(1 << 30)}';
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Map<String, dynamic>? _state;
@@ -116,9 +121,10 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     final channel = _channel;
     if (channel != null) {
       try {
-        channel.sink.add(
-          jsonEncode({'type': _state == null ? 'cancel' : 'leave'}),
-        );
+        // Leaving a game keeps it running; only lobby exits are cancelled.
+        if (_state == null) {
+          channel.sink.add(jsonEncode({'type': 'cancel'}));
+        }
         unawaited(channel.sink.close());
       } catch (_) {
         // The connection may already have closed.
@@ -170,6 +176,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
       channel.sink.add(
         jsonEncode({
           'type': 'join',
+          'clientId': _clientId,
           'name': _nameController.text.trim().isEmpty
               ? PlayerProfile.instance.name
               : _nameController.text.trim(),
@@ -429,6 +436,41 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     );
   }
 
+  /// Screen centres of the tiles already on the board, used by the reveal.
+  List<({Offset center, double scale, bool horizontal})> _boardTileSpecs() {
+    final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return const [];
+    final size = box.size;
+    final board = _board;
+    if (board.isEmpty) return const [];
+    final layout = computeLayout(
+      board,
+      maxWidth: size.width,
+      maxHeight: size.height,
+      smart: true,
+      topRun: _topRun,
+      bottomRun: _bottomRun,
+    );
+    final origin = box.localToGlobal(Offset.zero);
+    return [
+      for (final p in layout.positions)
+        (
+          center:
+              origin +
+              Offset(
+                (size.width - layout.bounds.width) / 2 +
+                    p.offset.dx -
+                    layout.bounds.left,
+                (size.height - layout.bounds.height) / 2 +
+                    p.offset.dy -
+                    layout.bounds.top,
+              ),
+          scale: layout.scale,
+          horizontal: p.horizontal,
+        ),
+    ];
+  }
+
   /// Same vertical-run growth as practice, so both boards lay out the same.
   void _maybeGrowVerticalRuns() {
     if (_topRun == 4 && _bottomRun == 4) return;
@@ -493,6 +535,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
       table: table,
       rack: _rectOf(_rackKey),
       hands: hands,
+      boardTiles: _boardTileSpecs(),
       sideOfHand: (s) => ((s - seat) % 4 + 4) % 4,
     );
     if (_revealRun == null) {
@@ -596,6 +639,53 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     }).catchError((error) {
       _connectionFailed(error);
     });
+  }
+
+  Future<void> _confirmLeave() async {
+    if (_state == null) {
+      _leave();
+      return;
+    }
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+        ),
+        title: const Text(
+          'LEAVE THE TABLE?',
+          style: TextStyle(
+            color: ArcadeColors.navy,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        content: const Text(
+          'Back to menu keeps the game running and you can rejoin from '
+          'online. Quit gives your seat to a bot.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'stay'),
+            child: const Text('STAY'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'menu'),
+            child: const Text('BACK TO MENU'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'quit'),
+            child: const Text('QUIT GAME'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || action == null || action == 'stay') return;
+    if (action == 'quit') {
+      _send({'type': 'quit'});
+      setState(() => _state = null);
+    }
+    _leave();
   }
 
   void _leave() {
@@ -1182,7 +1272,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                 team2Score: (scores[1] as num).toInt(),
                 targetScore: 100,
                 turnFraction: progress,
-                onMenu: _leave,
+                onMenu: _confirmLeave,
               ),
             ),
             Expanded(
@@ -1265,27 +1355,30 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                       child: Stack(
                         clipBehavior: Clip.none,
                         children: [
-                          GameBoard(
-                            key: _boardKey,
-                            board: _board,
-                            // Same snake layout as practice.
-                            smart: true,
-                            topRun: _topRun,
-                            bottomRun: _bottomRun,
-                            tileBuilder:
-                                (
-                                  tile, {
-                                  required bool horizontal,
-                                  required bool isFlipped,
-                                  required double scale,
-                                }) {
-                                  return SpriteDominoTile(
-                                    tile: tile,
-                                    horizontal: horizontal,
-                                    isFlipped: isFlipped,
-                                    scale: scale,
-                                  );
-                                },
+                          Opacity(
+                            opacity: _revealing ? 0 : 1,
+                            child: GameBoard(
+                              key: _boardKey,
+                              board: _board,
+                              // Same snake layout as practice.
+                              smart: true,
+                              topRun: _topRun,
+                              bottomRun: _bottomRun,
+                              tileBuilder:
+                                  (
+                                    tile, {
+                                    required bool horizontal,
+                                    required bool isFlipped,
+                                    required double scale,
+                                  }) {
+                                    return SpriteDominoTile(
+                                      tile: tile,
+                                      horizontal: horizontal,
+                                      isFlipped: isFlipped,
+                                      scale: scale,
+                                    );
+                                  },
+                            ),
                           ),
                           ..._endTargets(),
                         ],

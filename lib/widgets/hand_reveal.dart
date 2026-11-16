@@ -5,52 +5,51 @@ import 'package:flutter/material.dart';
 
 import '../models/domino_tile.dart';
 
-/// Plays the end-of-hand reveal: every player's leftover tiles appear face-up
-/// on their own side of the table, gather and shake in the middle, then fly
-/// back into their hands.
+/// Plays the end-of-hand shuffle: every tile on the table (the board plus the
+/// four hands, 28 in total) flips face-down, gathers in the middle, shakes,
+/// then flies out to the four hands.
 ///
 /// Shared by practice and online. The caller owns the [TickerProvider] and
 /// must [HandRevealRun.dispose] if it is torn down mid-animation.
 class HandReveal {
   HandReveal._();
 
-  static const int durationMs = 6000;
+  static const int durationMs = 8000;
 
-  /// [hands] is indexed by seat. [sideOfHand] maps a seat to a table side:
-  /// 0 = bottom (you), 1 = left, 2 = top, 3 = right.
+  static const double _holdUntilMs = 3000;
+  static const double _gatherMs = 800;
+  static const double _shakeStartMs = 3800;
+  static const double _shakeEndMs = 6300;
+  static const double _dealMs = 900;
+  static const double _tileScale = 0.5;
+
+  /// [hands] is indexed by seat. [boardTiles] are the tiles already on the
+  /// table, with their screen centre and size. [sideOfHand] maps a seat to a
+  /// table side: 0 = bottom (you), 1 = left, 2 = top, 3 = right.
   static HandRevealRun? play({
     required BuildContext context,
     required TickerProvider vsync,
     required Rect table,
     required Rect? rack,
     required List<List<DominoTile>> hands,
+    List<({Offset center, double scale, bool horizontal})> boardTiles =
+        const [],
     int Function(int seat) sideOfHand = _identitySide,
   }) {
-    const scale = 0.5;
-    const spriteW = 60.0 * scale;
-    const spriteH = 130.0 * scale;
     final specs = <_RevealSpec>[];
+    var index = 0;
 
+    // Tiles in the players' hands, waiting on their own side.
     for (var seat = 0; seat < hands.length; seat++) {
-      final tiles = List<DominoTile>.of(hands[seat]);
+      final tiles = hands[seat];
       if (tiles.isEmpty) continue;
       final side = sideOfHand(seat) % 4;
       final n = tiles.length;
       final row = side == 0 || side == 2;
-      // Tiles face their owner: readable from that player's seat.
-      final angle = switch (side) {
-        0 => 0.0,
-        2 => math.pi,
-        1 => math.pi / 2,
-        _ => -math.pi / 2,
-      };
-      // Portrait for top/bottom, landscape for the side seats, so the long
-      // side stays parallel to the player's edge.
-      final along = 60.0 * scale;
-      final perp = 130.0 * scale;
-      // The top row keeps clear of the seat avatar on the right.
+      final along = 60.0 * _tileScale;
+      final perp = 130.0 * _tileScale;
       final room = row
-          ? math.max(along, table.width - (side == 2 ? 96 : 28))
+          ? math.max(along, table.width - 28)
           : math.max(along, table.height * 0.68);
       final step = n > 1
           ? math.min(
@@ -58,21 +57,12 @@ class HandReveal {
               math.max(along * 0.5, (room - along) / (n - 1)),
             )
           : along + 2;
-
-      final Offset anchor;
-      switch (side) {
-        case 0:
-          anchor = rack?.center ?? Offset(table.center.dx, table.bottom - 14);
-          break;
-        case 1:
-          anchor = Offset(table.left + 30, table.center.dy);
-          break;
-        case 2:
-          anchor = Offset(table.center.dx, table.top + 34);
-          break;
-        default:
-          anchor = Offset(table.right - 30, table.center.dy);
-      }
+      final angle = switch (side) {
+        0 => 0.0,
+        2 => math.pi,
+        1 => math.pi / 2,
+        _ => -math.pi / 2,
+      };
 
       for (var i = 0; i < n; i++) {
         final t = i - (n - 1) / 2;
@@ -83,31 +73,36 @@ class HandReveal {
             rack?.center.dy ?? table.bottom - 14,
           );
         } else if (side == 2) {
-          slot = Offset(
-            table.left + 10 + along / 2 + i * step,
-            table.top + 4 + perp / 2,
-          );
+          slot = Offset(table.center.dx + t * step, table.top + 4 + perp / 2);
         } else if (side == 1) {
-          slot = Offset(
-            table.left + 8 + perp / 2,
-            table.center.dy + t * step,
-          );
+          slot = Offset(table.left + 8 + perp / 2, table.center.dy + t * step);
         } else {
-          slot = Offset(
-            table.right - 8 - perp / 2,
-            table.center.dy + t * step,
-          );
+          slot = Offset(table.right - 8 - perp / 2, table.center.dy + t * step);
         }
         specs.add(
           _RevealSpec(
-            tile: tiles[i],
-            hand: anchor,
             slot: slot,
-            angle: angle,
-            delay: i * 14.0,
+            startScale: _tileScale,
+            startAngle: angle,
+            delay: (index % 7) * 12.0,
           ),
         );
+        index++;
       }
+    }
+
+    // Tiles already on the board. The caller hides the board while this runs,
+    // so these backs take its place exactly.
+    for (final tile in boardTiles) {
+      specs.add(
+        _RevealSpec(
+          slot: tile.center,
+          startScale: tile.scale,
+          startAngle: tile.horizontal ? math.pi / 2 : 0,
+          delay: (index % 7) * 12.0,
+        ),
+      );
+      index++;
     }
 
     if (specs.isEmpty) return null;
@@ -119,9 +114,22 @@ class HandReveal {
       specs[i].gather =
           table.center +
           Offset(
-            (i % cols - (cols - 1) / 2) * 34,
-            (i ~/ cols - (rows - 1) / 2) * 17,
+            (i % cols - (cols - 1) / 2) * 30,
+            (i ~/ cols - (rows - 1) / 2) * 15,
           );
+      final side = (i ~/ 7).clamp(0, 3);
+      specs[i].dealAnchor = switch (side) {
+        0 => rack?.center ?? Offset(table.center.dx, table.bottom - 14),
+        1 => Offset(table.left + 30, table.center.dy),
+        2 => Offset(table.center.dx, table.top + 34),
+        _ => Offset(table.right - 30, table.center.dy),
+      };
+      specs[i].dealAngle = switch (side) {
+        0 => 0.0,
+        2 => math.pi,
+        1 => math.pi / 2,
+        _ => -math.pi / 2,
+      };
     }
 
     final controller = AnimationController(
@@ -138,7 +146,7 @@ class HandReveal {
               clipBehavior: Clip.none,
               children: [
                 for (var i = 0; i < specs.length; i++)
-                  _buildTile(specs[i], i, ms, spriteW, spriteH),
+                  _buildTile(specs[i], i, ms),
               ],
             );
           },
@@ -153,38 +161,32 @@ class HandReveal {
 
   static int _identitySide(int seat) => seat;
 
-  static Widget _buildTile(
-    _RevealSpec s,
-    int i,
-    double ms,
-    double w,
-    double h,
-  ) {
+  static Widget _buildTile(_RevealSpec s, int i, double ms) {
     var pos = s.slot;
-    var angle = s.angle;
+    var scale = s.startScale;
+    var angle = s.startAngle;
     var opacity = 1.0;
 
-    final emerge = (ms - s.delay) / 260;
-    if (emerge < 1) {
-      final p = Curves.easeOutCubic.transform(emerge.clamp(0.0, 1.0));
-      pos = Offset.lerp(s.hand, s.slot, p)!;
-      opacity = p;
-    }
+    final appear = (ms - s.delay) / 300;
+    if (appear < 1) opacity = appear.clamp(0.0, 1.0);
 
-    final gatherStart = 4300 + s.delay;
+    final gatherStart = _holdUntilMs + s.delay;
     if (ms >= gatherStart) {
       final p = Curves.easeInOutCubic.transform(
-        ((ms - gatherStart) / 700).clamp(0.0, 1.0),
+        ((ms - gatherStart) / _gatherMs).clamp(0.0, 1.0),
       );
       pos = Offset.lerp(s.slot, s.gather, p)!;
-      angle = _lerpAngle(s.angle, math.pi / 2, p);
+      scale = s.startScale + (_tileScale - s.startScale) * p;
+      angle = _lerpAngle(s.startAngle, math.pi / 2, p);
     }
 
-    const shakeStart = 4500.0;
-    const shakeEnd = 5450.0;
-    if (ms >= shakeStart && ms <= shakeEnd) {
+    if (ms >= _shakeStartMs && ms <= _shakeEndMs) {
       final k = math.sin(
-        math.pi * ((ms - shakeStart) / (shakeEnd - shakeStart)).clamp(0.0, 1.0),
+        math.pi *
+            ((ms - _shakeStartMs) / (_shakeEndMs - _shakeStartMs)).clamp(
+              0.0,
+              1.0,
+            ),
       );
       pos += Offset(
         math.sin(ms / 34 + i * 1.9) * 4.0 * k,
@@ -192,16 +194,18 @@ class HandReveal {
       );
     }
 
-    final returnStart = 5450 + s.delay;
-    if (ms >= returnStart) {
-      final p = Curves.easeInCubic.transform(
-        ((ms - returnStart) / 450).clamp(0.0, 1.0),
+    final dealStart = _shakeEndMs + s.delay;
+    if (ms >= dealStart) {
+      final p = Curves.easeInOutCubic.transform(
+        ((ms - dealStart) / _dealMs).clamp(0.0, 1.0),
       );
-      pos = Offset.lerp(s.gather, s.hand, p)!;
-      angle = _lerpAngle(math.pi / 2, s.angle, p);
+      pos = Offset.lerp(s.gather, s.dealAnchor, p)!;
+      angle = _lerpAngle(math.pi / 2, s.dealAngle, p);
       opacity = 1 - p;
     }
 
+    final w = 60.0 * scale;
+    final h = 130.0 * scale;
     return Positioned(
       left: pos.dx - w / 2,
       top: pos.dy - h / 2,
@@ -212,7 +216,7 @@ class HandReveal {
         child: Transform.rotate(
           angle: angle,
           child: Image.asset(
-            _faceAsset(s.tile),
+            'assets/tiles/t1back.png',
             width: w,
             height: h,
             fit: BoxFit.fill,
@@ -220,12 +224,6 @@ class HandReveal {
         ),
       ),
     );
-  }
-
-  static String _faceAsset(DominoTile t) {
-    final hi = math.max(t.top, t.bottom);
-    final lo = math.min(t.top, t.bottom);
-    return 'assets/tiles/t1d$hi$lo.png';
   }
 }
 
@@ -255,18 +253,18 @@ class HandRevealRun {
 }
 
 class _RevealSpec {
-  final DominoTile tile;
-  final Offset hand;
   final Offset slot;
-  final double angle;
+  final double startScale;
+  final double startAngle;
   final double delay;
   late Offset gather;
+  late Offset dealAnchor;
+  late double dealAngle;
 
   _RevealSpec({
-    required this.tile,
-    required this.hand,
     required this.slot,
-    required this.angle,
+    required this.startScale,
+    required this.startAngle,
     required this.delay,
   });
 }

@@ -82,6 +82,9 @@ class OpponentSeat extends StatelessWidget {
     // Avatars sit clockwise around the table: left seat on top, right seat
     // at the bottom.
     final avatarDown = _side == 3;
+    // Fixed slot sized for a full 7-tile hand, so the avatar never moves:
+    // the fan shrinks towards the avatar instead of the whole seat re-centring.
+    final slot = _fanMetrics(context, 7);
     return Padding(
       padding: EdgeInsets.zero,
       child: Column(
@@ -96,13 +99,22 @@ class OpponentSeat extends StatelessWidget {
             _namePlate(color),
           ],
           const SizedBox(height: 3),
-          Transform.translate(
-            // Hide 70% of the tiles under the side edge (30% visible).
-            offset: Offset(
-              (_side == 1 ? -1 : 1) * (130 * _tileScale * 0.7),
-              0,
+          SizedBox(
+            width: slot.tileW,
+            height: slot.total,
+            child: Align(
+              alignment: avatarDown
+                  ? Alignment.bottomCenter
+                  : Alignment.topCenter,
+              child: Transform.translate(
+                // Hide 70% of the tiles under the side edge (30% visible).
+                offset: Offset(
+                  (_side == 1 ? -1 : 1) * (130 * _tileScale * 0.7),
+                  0,
+                ),
+                child: _tileFan(context),
+              ),
             ),
-            child: _tileFan(context),
           ),
           if (avatarDown) ...[
             const SizedBox(height: 4),
@@ -242,11 +254,10 @@ class OpponentSeat extends StatelessWidget {
     );
   }
 
-  Widget _tileFan(BuildContext context) {
-    if (hideTiles) return const SizedBox.shrink();
-    final count = player.hand.length.clamp(0, 7);
-    if (count == 0) return const SizedBox.shrink();
-
+  ({double tileW, double tileH, double step, double total}) _fanMetrics(
+    BuildContext context,
+    int count,
+  ) {
     // Keep the big tile size. Tiles overlap only when the row/stack would
     // otherwise not fit, so the whole hand stays on screen.
     const scale = _tileScale;
@@ -268,18 +279,33 @@ class OpponentSeat extends StatelessWidget {
             math.max(long * 0.45, (maxLong - long) / (count - 1)),
           )
         : long + 2;
-    final total = long + (count - 1) * step;
+    return (
+      tileW: tileW,
+      tileH: tileH,
+      step: step,
+      total: long + (count - 1) * step,
+    );
+  }
+
+  Widget _tileFan(BuildContext context) {
+    if (hideTiles) return const SizedBox.shrink();
+    final count = player.hand.length.clamp(0, 7);
+    if (count == 0) return const SizedBox.shrink();
+
+    const scale = _tileScale;
+    final isTop = direction == Axis.horizontal;
+    final metrics = _fanMetrics(context, count);
 
     return SizedBox(
-      width: isTop ? total : tileW,
-      height: isTop ? tileH : total,
+      width: isTop ? metrics.total : metrics.tileW,
+      height: isTop ? metrics.tileH : metrics.total,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
           for (var i = 0; i < count; i++)
             Positioned(
-              left: isTop ? i * step : 0,
-              top: isTop ? 0 : i * step,
+              left: isTop ? i * metrics.step : 0,
+              top: isTop ? 0 : i * metrics.step,
               child: SpriteDominoTile(
                 tile: player.hand[i],
                 faceDown: true,

@@ -54,6 +54,8 @@ class Client {
   bool inQueue = false;
   int? userId;
   String? token;
+  /// Stable id sent by the app, so a player can rejoin after leaving.
+  String? clientId;
 
   Client(this.socket, this.name);
 
@@ -326,6 +328,8 @@ class Server {
   final Map<int, Client> onlineUsers = {};
   final Map<Room, Timer> _botTimers = {};
   final Map<Room, Timer> _handoverTimers = {};
+  /// Seats a player left while the game kept running: clientId -> room/seat.
+  final Map<String, ({int roomId, int seat, String name})> _savedSeats = {};
   int _nextRoom = 1;
   Timer? _matchmakingTimer;
   DateTime? _matchDeadline;
@@ -563,7 +567,8 @@ class Server {
           _pass(client);
           break;
         case 'leave':
-          _leaveRoom(client);
+        case 'quit':
+          _detachFromRoom(client, permanent: true);
           break;
         default:
           client.sendError('Unknown message type.');
@@ -580,10 +585,60 @@ class Server {
       client.name =
           raw.isEmpty ? 'Player' : raw.substring(0, min(raw.length, 16));
     }
+    final cid = (message['clientId'] as String?)?.trim();
+    if (cid != null && cid.isNotEmpty) client.clientId = cid;
+
+    // Back into a game this player left running?
+    if (_resumeRoom(client)) return;
+
     client.inQueue = true;
     queue.add(client);
     _startMatchmakingClock();
     _notifyQueue();
+  }
+
+  bool _resumeRoom(Client client) {
+    final cid = client.clientId;
+    if (cid == null) return false;
+    final saved = _savedSeats[cid];
+    if (saved == null) return false;
+
+    Room? room;
+    for (final r in rooms) {
+      if (r.id == saved.roomId) {
+        room = r;
+        break;
+      }
+    }
+    if (room == null ||
+        room.status == 'gameover' ||
+        room.seats[saved.seat] != null) {
+      _savedSeats.remove(cid);
+      return false;
+    }
+
+    _savedSeats.remove(cid);
+    room.seats[saved.seat] = client;
+    client.room = room;
+    client.seat = saved.seat;
+    client.inQueue = false;
+    client.name = saved.name;
+    client.send({
+      'type': 'start',
+      'room': room.id,
+      'seat': saved.seat,
+      'players': [
+        for (var i = 0; i < room.seats.length; i++)
+          {
+            'name': room.seats[i]?.name ?? 'Bot ${i + 1}',
+            'seat': i,
+            'team': i % 2,
+            'bot': room.seats[i] == null,
+          },
+      ],
+    });
+    _publishRoom(room);
+    return true;
   }
 
   void _startMatchmakingClock() {
@@ -776,6 +831,7 @@ class Server {
   void _recordMatch(Room room) {
     if (room.matchRecorded) return;
     room.matchRecorded = true;
+    _savedSeats.removeWhere((_, v) => v.roomId == room.id);
     final winner = room.winningTeam;
     if (winner == null) return;
     db.execute(
@@ -1125,7 +1181,7 @@ class Server {
       return;
     }
     if (_handoverTimers.containsKey(room)) return;
-    _handoverTimers[room] = Timer(const Duration(milliseconds: 6600), () {
+    _handoverTimers[room] = Timer(const Duration(milliseconds: 8600), () {
       _handoverTimers.remove(room);
       if (!rooms.contains(room) || room.status != 'handover') return;
       room.resumeAfterHandover();
@@ -1140,7 +1196,7 @@ class Server {
     }
     if (_botTimers.containsKey(room)) return;
 
-    _botTimers[room] = Timer(const Duration(milliseconds: 650), () {
+    _botTimers[room] = Timer(const Duration(milliseconds: 2500), () {
       _botTimers.remove(room);
       if (!rooms.contains(room) ||
           room.status != 'playing' ||
@@ -1152,27 +1208,46 @@ class Server {
     });
   }
 
-  void _leaveRoom(Client client) {
+  /// Takes a player off the table. [permanent] (quit) clears the saved seat
+  /// so they cannot come back; otherwise the seat is remembered and the bot
+  /// plays the hand until they rejoin.
+  void _detachFromRoom(Client client, {required bool permanent}) {
     final room = client.room;
     if (room == null) return;
     client.room = null;
+    final seat = client.seat;
+    client.seat = null;
+    if (seat == null) return;
+
+    final cid = client.clientId;
+    if (!permanent && cid != null && room.status != 'gameover') {
+      _savedSeats[cid] = (roomId: room.id, seat: seat, name: client.name);
+    } else if (cid != null) {
+      _savedSeats.remove(cid);
+    }
+
+    room.seats[seat] = null; // the bot plays the remaining hand
+    if (room.status == 'gameover') {
+      _maybeRemoveRoom(room);
+      return;
+    }
+    room.lastMessage = '${client.name} left · bot is playing';
+    _publishRoom(room);
+  }
+
+  void _maybeRemoveRoom(Room room) {
+    if (room.status != 'gameover') return;
+    if (room.seats.any((c) => c != null)) return;
+    rooms.remove(room);
     _botTimers.remove(room)?.cancel();
     _handoverTimers.remove(room)?.cancel();
-    for (final other in room.seats) {
-      if (other == null || other == client || !other.alive) continue;
-      other.send({
-        'type': 'gameover',
-        'message': '${client.name} left the game.',
-      });
-      other.room = null;
-    }
-    rooms.remove(room);
+    _savedSeats.removeWhere((_, v) => v.roomId == room.id);
   }
 
   void _onDisconnect(Client client) {
     if (client.userId != null) onlineUsers.remove(client.userId);
     _leaveQueue(client);
-    _leaveRoom(client);
+    _detachFromRoom(client, permanent: false);
   }
 }
 

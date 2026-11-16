@@ -833,7 +833,13 @@ class _MainMenuState extends State<MainMenu> with TickerProviderStateMixin {
   Widget _ruleChip(int index, String icon, String label) {
     final selected = _rule == index;
     return _PressButton(
-      onTap: () => setState(() => _rule = index),
+      onTap: () {
+        if (index != 0) {
+          _showMessage('$label mode is coming soon');
+          return;
+        }
+        setState(() => _rule = index);
+      },
       height: 46,
       depth: 5,
       radius: 15,

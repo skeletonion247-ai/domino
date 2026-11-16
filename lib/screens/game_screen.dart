@@ -8,6 +8,7 @@ import '../models/domino_tile.dart';
 import '../models/game_state.dart';
 import '../models/player.dart';
 import '../services/audio_service.dart';
+import '../services/practice_session.dart';
 import '../widgets/game_board.dart';
 import '../widgets/hand_over_dialog.dart';
 import '../widgets/hand_reveal.dart';
@@ -55,15 +56,9 @@ class _GameScreenState extends State<GameScreen>
   int _turnIndex = -1;
   int _consecutivePasses = 0;
   bool _handOver = false;
+  bool _quitting = false;
 
-  final List<DominoTile> _hand = [
-    const DominoTile(0, 0),
-    const DominoTile(1, 2),
-    const DominoTile(3, 4),
-    const DominoTile(0, 6),
-    const DominoTile(5, 5),
-    const DominoTile(2, 3),
-  ];
+  late final List<DominoTile> _hand;
 
   /// Vertical run length for each line of the practice snake. Both start at
   /// the classic 3 and may each grow to 4 once, if that line has free space.
@@ -71,52 +66,9 @@ class _GameScreenState extends State<GameScreen>
   double _topRun = 3;
   double _bottomRun = 3;
 
-  final List<PlacedTile> _board = [
-    PlacedTile(const DominoTile(6, 6), 'center', 6),
-    PlacedTile(const DominoTile(6, 5), 'left', 6),
-    PlacedTile(const DominoTile(5, 4), 'left', 5),
-    PlacedTile(const DominoTile(6, 2), 'right', 6),
-  ];
+  late final List<PlacedTile> _board;
 
-  final List<Player> _players = [
-    Player(name: 'You', team: 0),
-    Player(
-      name: 'Bot 1',
-      team: 1,
-      hand: [
-        const DominoTile(0, 1),
-        const DominoTile(1, 3),
-        const DominoTile(2, 4),
-        const DominoTile(3, 5),
-        const DominoTile(1, 6),
-        const DominoTile(4, 6),
-      ],
-    ),
-    Player(
-      name: 'Bot 2',
-      team: 0,
-      hand: [
-        const DominoTile(0, 2),
-        const DominoTile(1, 4),
-        const DominoTile(2, 5),
-        const DominoTile(3, 6),
-        const DominoTile(1, 5),
-        const DominoTile(0, 3),
-      ],
-    ),
-    Player(
-      name: 'Bot 3',
-      team: 1,
-      hand: [
-        const DominoTile(0, 4),
-        const DominoTile(0, 5),
-        const DominoTile(1, 1),
-        const DominoTile(2, 2),
-        const DominoTile(3, 3),
-        const DominoTile(4, 4),
-      ],
-    ),
-  ];
+  late final List<Player> _players;
 
   @override
   void initState() {
@@ -125,7 +77,39 @@ class _GameScreenState extends State<GameScreen>
       vsync: this,
       duration: const Duration(milliseconds: 520),
     );
-    _dealGame();
+
+    final saved = PracticeSession.instance;
+    if (saved.active) {
+      _hand = saved.hand;
+      _players = saved.players;
+      _board = saved.board;
+      _team1Score = saved.team1Score;
+      _team2Score = saved.team2Score;
+      _current = saved.current;
+      _consecutivePasses = saved.consecutivePasses;
+      _handOver = saved.handOver;
+      _topRun = saved.topRun;
+      _bottomRun = saved.bottomRun;
+      if (_handOver) {
+        if (_team1Score >= _targetScore || _team2Score >= _targetScore) {
+          _dealGame();
+        } else {
+          _dealHand();
+        }
+      }
+    } else {
+      _hand = <DominoTile>[];
+      _players = [
+        Player(name: 'You', team: 0),
+        Player(name: 'Bot 1', team: 1),
+        Player(name: 'Bot 2', team: 0),
+        Player(name: 'Bot 3', team: 1),
+      ];
+      _board = <PlacedTile>[];
+      saved.bind(hand: _hand, players: _players, board: _board);
+      _dealGame();
+    }
+
     _ticker = Timer.periodic(const Duration(milliseconds: 100), _onTick);
     _scheduleBots();
     WidgetsBinding.instance.addPostFrameCallback((_) => _precacheTiles());
@@ -150,6 +134,20 @@ class _GameScreenState extends State<GameScreen>
   void dispose() {
     _botTimer?.cancel();
     _ticker?.cancel();
+    final session = PracticeSession.instance;
+    if (_quitting) {
+      session.clear();
+    } else {
+      session
+        ..active = true
+        ..team1Score = _team1Score
+        ..team2Score = _team2Score
+        ..current = _current
+        ..consecutivePasses = _consecutivePasses
+        ..handOver = _handOver
+        ..topRun = _topRun
+        ..bottomRun = _bottomRun;
+    }
     _turnProgress.dispose();
     _flyEntry?.remove();
     _flyEntry = null;
@@ -686,6 +684,49 @@ class _GameScreenState extends State<GameScreen>
     );
   }
 
+  Future<void> _confirmLeave() async {
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+        ),
+        title: const Text(
+          'LEAVE THE TABLE?',
+          style: TextStyle(
+            color: Color(0xFF0B2A5B),
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        content: const Text(
+          'Back to menu keeps this game so you can continue it later. '
+          'Quit ends it.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'stay'),
+            child: const Text('STAY'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'menu'),
+            child: const Text('BACK TO MENU'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'quit'),
+            child: const Text('QUIT GAME'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || action == null || action == 'stay') return;
+    if (action == 'quit') {
+      _quitting = true;
+      PracticeSession.instance.clear();
+    }
+    Navigator.of(context).maybePop();
+  }
+
   void _reorderHand(int oldIndex, int newIndex) {
     // ReorderableListView already adjusts newIndex for the removed item.
     if (newIndex == oldIndex) return;
@@ -720,7 +761,7 @@ class _GameScreenState extends State<GameScreen>
       return;
     }
     _botTimer = Timer(
-      Duration(milliseconds: widget.autoPlay ? 240 : 800),
+      Duration(milliseconds: widget.autoPlay ? 240 : 2500),
       _playBot,
     );
   }
@@ -918,6 +959,40 @@ class _GameScreenState extends State<GameScreen>
 
   /// End-of-hand reveal: every player's leftover tiles appear face-up on their
   /// own side of the table, gather and shake in the middle, then fly back.
+  /// Screen centres of the tiles already on the board, used by the reveal to
+  /// sweep all 28 tiles into the middle.
+  List<({Offset center, double scale, bool horizontal})> _boardTileSpecs() {
+    final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return const [];
+    final size = box.size;
+    final layout = computeLayout(
+      _board,
+      maxWidth: size.width,
+      maxHeight: size.height,
+      smart: true,
+      topRun: _topRun,
+      bottomRun: _bottomRun,
+    );
+    final origin = box.localToGlobal(Offset.zero);
+    return [
+      for (final p in layout.positions)
+        (
+          center:
+              origin +
+              Offset(
+                (size.width - layout.bounds.width) / 2 +
+                    p.offset.dx -
+                    layout.bounds.left,
+                (size.height - layout.bounds.height) / 2 +
+                    p.offset.dy -
+                    layout.bounds.top,
+              ),
+          scale: layout.scale,
+          horizontal: p.horizontal,
+        ),
+    ];
+  }
+
   void _playReveal(VoidCallback onDone) {
     final table = _rectOf(_tableKey);
     if (table == null) {
@@ -938,6 +1013,7 @@ class _GameScreenState extends State<GameScreen>
       table: table,
       rack: _rectOf(_rackKey),
       hands: hands,
+      boardTiles: _boardTileSpecs(),
     );
     if (_revealRun == null) {
       setState(() => _revealing = false);
@@ -1010,7 +1086,7 @@ class _GameScreenState extends State<GameScreen>
                 team2Score: _team2Score,
                 targetScore: _targetScore,
                 turnFraction: progress,
-                onMenu: () => Navigator.of(context).maybePop(),
+                onMenu: _confirmLeave,
               ),
             ),
             Expanded(
@@ -1105,26 +1181,29 @@ class _GameScreenState extends State<GameScreen>
                         child: Stack(
                           clipBehavior: Clip.none,
                           children: [
-                            GameBoard(
-                              key: _boardKey,
-                              board: _board,
-                              smart: true,
-                              topRun: _topRun,
-                              bottomRun: _bottomRun,
-                              tileBuilder:
-                                  (
-                                    tile, {
-                                    required bool horizontal,
-                                    required bool isFlipped,
-                                    required double scale,
-                                  }) {
-                                    return SpriteDominoTile(
-                                      tile: tile,
-                                      horizontal: horizontal,
-                                      isFlipped: isFlipped,
-                                      scale: scale,
-                                    );
-                                  },
+                            Opacity(
+                              opacity: _revealing ? 0 : 1,
+                              child: GameBoard(
+                                key: _boardKey,
+                                board: _board,
+                                smart: true,
+                                topRun: _topRun,
+                                bottomRun: _bottomRun,
+                                tileBuilder:
+                                    (
+                                      tile, {
+                                      required bool horizontal,
+                                      required bool isFlipped,
+                                      required double scale,
+                                    }) {
+                                      return SpriteDominoTile(
+                                        tile: tile,
+                                        horizontal: horizontal,
+                                        isFlipped: isFlipped,
+                                        scale: scale,
+                                      );
+                                    },
+                              ),
                             ),
                             ..._buildEndTargets(),
                           ],
