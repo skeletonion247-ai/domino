@@ -275,52 +275,16 @@ class _GameScreenState extends State<GameScreen>
     if (_topRun == 4 && _bottomRun == 4) return;
     final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return;
-    final size = box.size;
-    if (size.width >= size.height) return; // portrait / tall screens only
-
-    // Never grow a vertical run before its own horizontal row is already
-    // laid. Until then the classic 3-tile runs stay untouched, so the snake
-    // cannot run 4 (or 4.5 with a double) down a line that has not turned
-    // horizontally yet.
-    final full = fullHorizontalRows(
-      _board,
-      maxWidth: size.width,
-      maxHeight: size.height,
+    final next = growVerticalRuns(
+      board: _board,
+      size: box.size,
+      top: _topRun,
+      bottom: _bottomRun,
     );
-    if ((_topRun == 4 || !full.top) && (_bottomRun == 4 || !full.bottom)) {
-      return;
-    }
-
-    SnakeLayout at(double top, double bottom) => computeLayout(
-          _board,
-          maxWidth: size.width,
-          maxHeight: size.height,
-          smart: true,
-          topRun: top,
-          bottomRun: bottom,
-        );
-
-    var top = _topRun;
-    var bottom = _bottomRun;
-    var current = at(top, bottom);
-
-    if (top == 3 && full.top) {
-      final next = at(4, bottom);
-      if (!next.fellBack && next.scale >= current.scale - 0.001) {
-        top = 4;
-        current = next;
-      }
-    }
-    if (bottom == 3 && full.bottom) {
-      final next = at(top, 4);
-      if (!next.fellBack && next.scale >= current.scale - 0.001) {
-        bottom = 4;
-      }
-    }
-    if (top != _topRun || bottom != _bottomRun) {
+    if (next.top != _topRun || next.bottom != _bottomRun) {
       setState(() {
-        _topRun = top;
-        _bottomRun = bottom;
+        _topRun = next.top;
+        _bottomRun = next.bottom;
       });
     }
   }

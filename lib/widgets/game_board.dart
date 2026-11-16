@@ -889,6 +889,58 @@ SnakeLayout computeLayout(
   return (top: top, bottom: bottom);
 }
 
+/// Decides whether a side's vertical run may grow from 3 to 4 so the snake
+/// uses the free space on tall screens instead of shrinking.
+///
+/// Shared by practice and online so both boards lay out identically.
+({double top, double bottom}) growVerticalRuns({
+  required List<PlacedTile> board,
+  required Size size,
+  required double top,
+  required double bottom,
+}) {
+  if (top == 4 && bottom == 4) return (top: top, bottom: bottom);
+  if (size.width >= size.height) return (top: top, bottom: bottom);
+
+  // Never grow a vertical run before its own horizontal row is already laid.
+  final full = fullHorizontalRows(
+    board,
+    maxWidth: size.width,
+    maxHeight: size.height,
+  );
+  if ((top == 4 || !full.top) && (bottom == 4 || !full.bottom)) {
+    return (top: top, bottom: bottom);
+  }
+
+  SnakeLayout at(double t, double b) => computeLayout(
+        board,
+        maxWidth: size.width,
+        maxHeight: size.height,
+        smart: true,
+        topRun: t,
+        bottomRun: b,
+      );
+
+  var t = top;
+  var b = bottom;
+  var current = at(t, b);
+
+  if (t == 3 && full.top) {
+    final next = at(4, b);
+    if (!next.fellBack && next.scale >= current.scale - 0.001) {
+      t = 4;
+      current = next;
+    }
+  }
+  if (b == 3 && full.bottom) {
+    final next = at(t, 4);
+    if (!next.fellBack && next.scale >= current.scale - 0.001) {
+      b = 4;
+    }
+  }
+  return (top: t, bottom: b);
+}
+
 void _addSide(
   List<TilePlacement> out,
   List<PlacedTile> tiles,

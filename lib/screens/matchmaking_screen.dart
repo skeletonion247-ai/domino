@@ -45,7 +45,6 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   List<Map<String, dynamic>> _leaderboardEntries = [];
   int _coins = 0;
   int _gems = 0;
-  bool _adWatchedForNext = false;
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Map<String, dynamic>? _state;
@@ -58,14 +57,16 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   List<Map<String, dynamic>> _queuePlayers = [];
   String? _error;
   DominoTile? _selected;
+  DominoTile? _dragTile;
   final GlobalKey _boardKey = GlobalKey();
   final GlobalKey _tableKey = GlobalKey();
   final GlobalKey _rackKey = GlobalKey();
   HandRevealRun? _revealRun;
   bool _revealing = false;
+  double _topRun = 3;
+  double _bottomRun = 3;
   bool _resultRecorded = false;
   bool _resultDialogShown = false;
-  String? _lastPlacedId;
   List<DominoTile>? _localHand;
   Rect? _selectedFromRect;
   bool _animating = false;
@@ -150,7 +151,6 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
       _phase = 'connecting';
       _error = null;
       _secondsRemaining = 20;
-      _adWatchedForNext = false;
     });
 
     if (isNew) {
@@ -211,7 +211,6 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
             _resultDialogShown = false;
             _localHand = null;
             _timerTurn = -1;
-            _lastPlacedId = null;
             _selectedFromRect = null;
             _animating = false;
           });
@@ -237,7 +236,10 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
             _seat = (message['you'] as num?)?.toInt() ?? _seat;
             _selected = null;
             _selectedFromRect = null;
-            if (newlyPlaced != null) _lastPlacedId = newlyPlaced;
+            if ((message['board'] as List?)?.isEmpty ?? true) {
+              _topRun = 3;
+              _bottomRun = 3;
+            }
           });
           _syncHandOrder();
           _startTurnTimer(
@@ -245,6 +247,7 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
             message['status']?.toString() ?? 'playing',
           );
           _syncAutoPass();
+          _maybeGrowVerticalRuns();
           if (message['status']?.toString() == 'handover') {
             final hands = _parseHands(message['allHands']);
             if (hands != null) _playRevealHands(hands);
@@ -426,6 +429,27 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     );
   }
 
+  /// Same vertical-run growth as practice, so both boards lay out the same.
+  void _maybeGrowVerticalRuns() {
+    if (_topRun == 4 && _bottomRun == 4) return;
+    final box = _boardKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final board = _board;
+    if (board.isEmpty) return;
+    final next = growVerticalRuns(
+      board: board,
+      size: box.size,
+      top: _topRun,
+      bottom: _bottomRun,
+    );
+    if (next.top != _topRun || next.bottom != _bottomRun) {
+      setState(() {
+        _topRun = next.top;
+        _bottomRun = next.bottom;
+      });
+    }
+  }
+
   List<List<DominoTile>>? _parseHands(dynamic raw) {
     if (raw is! List || raw.length != 4) return null;
     final hands = <List<DominoTile>>[];
@@ -572,13 +596,6 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
     }).catchError((error) {
       _connectionFailed(error);
     });
-  }
-
-  Future<void> _watchAdToContinue() async {
-    await adService.showInterstitial();
-    _adWatchedForNext = true;
-    _send({'type': 'ad_reward', 'rewardType': 'continue'});
-    setState(() => _authMessage = 'Ad watched. You can join again.');
   }
 
   void _leave() {
@@ -763,44 +780,64 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
   }
 
   List<Widget> _endTargets() {
-    final tile = _selected;
-    if (tile == null || _animating || !_myTurn) return const [];
+    final tile = _dragTile ?? _selected;
+    if (tile == null) return const [];
+    if (!_myTurn || _animating) return const [];
+
     return [
       for (final side in const ['left', 'right'])
         if (_fitsEnd(tile, side))
           if (_targetRect(tile, side) case final rect?)
-            Positioned.fromRect(
-              rect: rect.inflate(6),
-              child: GestureDetector(
-                onTap: () => _play(
-                  tile,
-                  side,
-                  fromRect: _selectedFromRect,
-                ),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFD700).withValues(alpha: 0.45),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: const Color(0xFFFFD700),
-                      width: 2,
+            _endTarget(tile, side, rect),
+    ];
+  }
+
+  Widget _endTarget(DominoTile tile, String side, Rect rect) {
+    const margin = 18.0;
+    return Positioned.fromRect(
+      rect: rect.inflate(margin),
+      child: DragTarget<DominoTile>(
+        onWillAcceptWithDetails: (details) => _fitsEnd(details.data, side),
+        onAcceptWithDetails: (details) => _play(
+          details.data,
+          side,
+          fromRect: Rect.fromLTWH(details.offset.dx, details.offset.dy, 40, 88),
+        ),
+        builder: (context, candidate, rejected) {
+          final hover = candidate.isNotEmpty;
+          return GestureDetector(
+            onTap: () => _play(tile, side, fromRect: _selectedFromRect),
+            child: Padding(
+              padding: const EdgeInsets.all(margin),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 120),
+                decoration: BoxDecoration(
+                  color: hover
+                      ? const Color(0xFFFFD700).withValues(alpha: 0.45)
+                      : const Color(0xFF0A2518).withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFFFFD700).withValues(alpha: 0.9),
+                    width: 2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFFFFD700).withValues(alpha: 0.35),
+                      blurRadius: 10,
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFFFFD700).withValues(alpha: 0.5),
-                        blurRadius: 10,
-                      ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.add_rounded,
-                    color: Color(0xFFFFD700),
-                    size: 26,
-                  ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.add_rounded,
+                  color: Color(0xFFFFD700),
+                  size: 26,
                 ),
               ),
             ),
-    ];
+          );
+        },
+      ),
+    );
   }
 
   void _play(DominoTile tile, String side, {Rect? fromRect}) {
@@ -1157,27 +1194,22 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                   const Positioned.fill(child: _FeltBackground()),
                   Positioned.fill(
                     child: DragTarget<DominoTile>(
-                      onWillAcceptWithDetails: (details) =>
-                          !_animating &&
-                          _myTurn &&
-                          _playable.contains(details.data),
+                      onWillAcceptWithDetails: (details) {
+                        if (!_myTurn || _animating) return false;
+                        final left = _fitsEnd(details.data, 'left');
+                        final right = _fitsEnd(details.data, 'right');
+                        return left != right;
+                      },
                       onAcceptWithDetails: (details) {
-                        final tile = details.data;
-                        final fitsLeft = _left >= 0 && tile.matches(_left);
-                        final fitsRight = _right >= 0 && tile.matches(_right);
-                        final side = fitsLeft && fitsRight
-                            ? (details.offset.dx <
-                                    MediaQuery.sizeOf(context).width / 2
-                                ? 'left'
-                                : 'right')
-                            : (fitsLeft ? 'left' : 'right');
+                        final left = _fitsEnd(details.data, 'left');
                         _play(
-                          tile,
-                          side,
-                          fromRect: Rect.fromCenter(
-                            center: details.offset,
-                            width: 40,
-                            height: 88,
+                          details.data,
+                          left ? 'left' : 'right',
+                          fromRect: Rect.fromLTWH(
+                            details.offset.dx,
+                            details.offset.dy,
+                            40,
+                            88,
                           ),
                         );
                       },
@@ -1185,59 +1217,9 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                           const SizedBox.expand(),
                     ),
                   ),
-                  Positioned.fill(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(44, 68, 44, 32),
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          GameBoard(
-                            key: _boardKey,
-                            board: _board,
-                            // Same snake layout as practice.
-                            smart: true,
-                            tileBuilder:
-                                (
-                                  tile, {
-                                  required horizontal,
-                                  required isFlipped,
-                                  required scale,
-                                }) {
-                                  Widget face = SpriteDominoTile(
-                                    tile: tile,
-                                    horizontal: horizontal,
-                                    isFlipped: isFlipped,
-                                    scale: scale,
-                                  );
-                                  if ('${tile.top}-${tile.bottom}' ==
-                                      _lastPlacedId) {
-                                    face = TweenAnimationBuilder<double>(
-                                      tween: Tween<double>(begin: 0, end: 1),
-                                      duration: const Duration(
-                                        milliseconds: 260,
-                                      ),
-                                      curve: Curves.easeOutBack,
-                                      builder: (context, t, child) => Opacity(
-                                        opacity: t.clamp(0.0, 1.0),
-                                        child: Transform.scale(
-                                          scale: 0.7 + 0.3 * t,
-                                          child: child,
-                                        ),
-                                      ),
-                                      child: face,
-                                    );
-                                  }
-                                  return face;
-                                },
-                          ),
-                          ..._endTargets(),
-                        ],
-                      ),
-                    ),
-                  ),
                   if (_seat >= 0 && players.length == 4) ...[
                     Positioned(
-                      top: 2,
+                      top: 4,
                       left: 0,
                       right: 0,
                       child: _opponent(
@@ -1277,22 +1259,36 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                       ),
                     ),
                   ],
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 8,
-                    child: Center(
-                      child: Text(
-                        gameOver
-                            ? (_state?['message']?.toString() ?? 'MATCH OVER')
-                            : _myTurn
-                            ? 'YOUR TURN'
-                            : '${_playerName(_turn, players)} IS PLAYING',
-                        style: const TextStyle(
-                          color: ArcadeColors.gold,
-                          fontWeight: FontWeight.w900,
-                          shadows: [Shadow(color: Colors.black, blurRadius: 5)],
-                        ),
+                  Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(42, 39, 42, 11),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          GameBoard(
+                            key: _boardKey,
+                            board: _board,
+                            // Same snake layout as practice.
+                            smart: true,
+                            topRun: _topRun,
+                            bottomRun: _bottomRun,
+                            tileBuilder:
+                                (
+                                  tile, {
+                                  required bool horizontal,
+                                  required bool isFlipped,
+                                  required double scale,
+                                }) {
+                                  return SpriteDominoTile(
+                                    tile: tile,
+                                    horizontal: horizontal,
+                                    isFlipped: isFlipped,
+                                    scale: scale,
+                                  );
+                                },
+                          ),
+                          ..._endTargets(),
+                        ],
                       ),
                     ),
                   ),
@@ -1300,71 +1296,25 @@ class _MatchmakingScreenState extends State<MatchmakingScreen>
                 ),
               ),
             ),
-            if (gameOver)
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    ElevatedButton(
-                      onPressed: _adWatchedForNext ? _leave : _watchAdToContinue,
-                      child: Text(
-                        _adWatchedForNext
-                            ? 'BACK TO MENU'
-                            : 'WATCH AD TO PLAY AGAIN',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    if (_adWatchedForNext)
-                      ElevatedButton(
-                        onPressed: _leave,
-                        child: const Text('BACK TO MENU'),
-                      ),
-                  ],
-                ),
-              )
-            else ...[
-              if (selected != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
-                  child: Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Tap a glowing end on the board',
-                          style: TextStyle(color: ArcadeColors.gold),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () => setState(() => _selected = null),
-                        child: const Text('CANCEL'),
-                      ),
-                    ],
-                  ),
-                )
-              else if (_myTurn && _playable.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
-                  child: ElevatedButton(
-                    onPressed: () => _send({'type': 'pass'}),
-                    child: const Text('PASS TURN'),
-                  ),
-                ),
-              ValueListenableBuilder<double>(
-                valueListenable: _turnProgress,
-                builder: (context, progress, _) => PlayerRack(
-                  key: _rackKey,
-                  hand: _localHand ?? _hand,
-                  playable: _playable,
-                  isMyTurn: _myTurn,
-                  turnFraction: progress,
-                  hideTiles: _revealing,
-                  onTileTap: _onTileTap,
-                  onSort: _sortHand,
-                  onReorder: _reorderHand,
-                ),
+            ValueListenableBuilder<double>(
+              valueListenable: _turnProgress,
+              builder: (context, progress, _) => PlayerRack(
+                key: _rackKey,
+                hand: _localHand ?? _hand,
+                playable: _playable,
+                isMyTurn: _myTurn,
+                turnFraction: progress,
+                hideTiles: _revealing,
+                onTileTap: _onTileTap,
+                onSort: _sortHand,
+                onReorder: _reorderHand,
+                onPlayDragChanged: (tile) {
+                  if (_dragTile != tile) {
+                    setState(() => _dragTile = tile);
+                  }
+                },
               ),
-            ],
+            ),
           ],
         ),
       ),
